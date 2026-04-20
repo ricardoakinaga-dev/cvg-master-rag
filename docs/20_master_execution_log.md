@@ -103,6 +103,39 @@ COMPLETED
 
 ---
 
+## ENTRY: REPOSITORY SCOPE CLEANUP
+
+### TIMESTAMP
+2026-04-19 23:15
+
+### ENGINE
+REPOSITORY_GOVERNANCE
+
+### PHASE
+GOVERNANCE
+
+### SPRINT
+NONE
+
+### TASK
+Remover diretórios auxiliares do repositório versionado
+
+### ACTION
+Excluir `BRIEFING/` e `transcricao-yt/` do índice git, registrar ambos no `.gitignore` e manter esses diretórios apenas no ambiente local
+
+### RESULT
+- `BRIEFING/` removido do versionamento
+- `transcricao-yt/` removido do versionamento
+- `.gitignore` atualizado para evitar reintrodução acidental desses diretórios
+
+### DECISIONS
+Esses diretórios deixam de compor o escopo oficial do repositório remoto e permanecem somente como apoio local
+
+### STATUS
+COMPLETED
+
+---
+
 ## ENTRY: FORMAL AUDIT REFRESH
 
 ### TIMESTAMP

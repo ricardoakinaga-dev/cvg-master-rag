@@ -35,6 +35,8 @@ src/logs/*.jsonl
 !src/logs/.gitkeep
 src/data/
 src/data/documents/
+BRIEFING/
+transcricao-yt/
 
 # OS noise
 .DS_Store

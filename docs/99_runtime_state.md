@@ -5,11 +5,11 @@
 ## CONTEXTO
 - project: cvg-master-rag
 - current_engine: REPOSITORY_GOVERNANCE
-- completion_status: ✅ REPOSITÓRIO LOCAL VERSIONADO E PUBLICADO NO GITHUB
+- completion_status: ✅ REPOSITÓRIO PUBLICADO COM ESCOPOS AUXILIARES REMOVIDOS DO GIT
 
 ## POSIÇÃO ATUAL
-- current_phase: GOVERNANCE — INITIAL GIT PUBLISH COMPLETED
-- current_task: snapshot atual do projeto normalizado com .gitignore e enviado para origin/main
+- current_phase: GOVERNANCE — REPOSITORY SCOPE NORMALIZED
+- current_task: BRIEFING e transcricao-yt removidos do versionamento para manter no GitHub apenas o escopo oficial do projeto
 
 ## STATUS
 - status: READY_FOR_NEXT_STEP
@@ -17,18 +17,18 @@
 - score_target: 96/100
 
 ## PROGRESSO
-- last_completed_action: repositório local inicializado em git, segredos/artefatos locais protegidos por `.gitignore` e snapshot publicado em `origin/main`
-- next_action: Continuar evolução incremental do produto já com trilha oficial versionada no GitHub
+- last_completed_action: diretórios auxiliares `BRIEFING/` e `transcricao-yt/` retirados do controle de versão e protegidos por `.gitignore`
+- next_action: Continuar evolução incremental apenas com artefatos canônicos do projeto no repositório remoto
 
 ## BLOQUEIOS
 - blockers: none
 
 ## DECISÃO HUMANA
 - human_decision_required: no
-- decision_description: Publicação inicial concluída sem subir `.env`, caches, ambientes virtuais e dados operacionais locais
+- decision_description: O repositório remoto passa a manter apenas artefatos canônicos; `BRIEFING/` e `transcricao-yt/` permanecem somente como contexto local
 
 ## TIMESTAMP
-- last_update: 2026-04-19T23:05:00-03:00
+- last_update: 2026-04-19T23:15:00-03:00
 
 ---
 
@@ -54,6 +54,7 @@ O agente DEVE:
 | 2026-04-19 | BUILD_CLOSEOUT | COMPLETED | P0 | Fechamento TKT-010 + F3 + governança + trilha normativa | COMPLETED |
 | 2026-04-19 | BUILD_INCREMENTAL | COMPLETED | P1 | Retrieval profile oficial em backend/frontend sem regressão | COMPLETED |
 | 2026-04-19 | REPOSITORY_GOVERNANCE | COMPLETED | NONE | Initial git publish para GitHub com `.gitignore` e remoto oficial | COMPLETED |
+| 2026-04-19 | REPOSITORY_GOVERNANCE | COMPLETED | NONE | Remoção de `BRIEFING/` e `transcricao-yt/` do git remoto | COMPLETED |
 
 ---
 

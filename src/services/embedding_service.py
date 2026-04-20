@@ -3,10 +3,9 @@ Embedding Service — OpenAI text-embedding-3-small
 Generates dense vectors for chunks.
 """
 import os
-import time
 import hashlib
 import math
-from typing import Optional
+from typing import Iterable
 
 from openai import OpenAI
 
@@ -14,6 +13,11 @@ from core.config import EMBEDDING_MODEL, EMBEDDING_DIM
 
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
+EMBEDDING_MAX_CHARS_PER_ITEM = 8000
+# Keep a healthy margin below the provider batch limit to avoid request-level
+# failures on large corpora or token-dense documents.
+EMBEDDING_MAX_ESTIMATED_TOKENS_PER_REQUEST = 200_000
+EMBEDDING_ESTIMATED_CHARS_PER_TOKEN = 3
 
 
 def _offline_embedding(text: str, dim: int = EMBEDDING_DIM) -> list[float]:
@@ -40,6 +44,46 @@ def _offline_embedding(text: str, dim: int = EMBEDDING_DIM) -> list[float]:
     return [v / norm for v in vector]
 
 
+def _truncate_for_embedding(text: str) -> str:
+    """Apply the per-item payload ceiling used by the embedding endpoint."""
+    return (text or "")[:EMBEDDING_MAX_CHARS_PER_ITEM]
+
+
+def _estimate_tokens(text: str) -> int:
+    """Cheap conservative token estimate used only for batch sizing."""
+    if not text:
+        return 1
+    return max(1, math.ceil(len(text) / EMBEDDING_ESTIMATED_CHARS_PER_TOKEN))
+
+
+def _iter_embedding_batches(texts: list[str]) -> Iterable[list[str]]:
+    """
+    Split embedding inputs into request-safe batches while preserving order.
+
+    The OpenAI embeddings endpoint enforces a request-level token ceiling.
+    Large documents can produce many chunks, so sending every chunk in a single
+    request can fail even when each chunk is individually short enough.
+    """
+    current_batch: list[str] = []
+    current_tokens = 0
+
+    for raw_text in texts:
+        text = _truncate_for_embedding(raw_text)
+        estimated_tokens = _estimate_tokens(text)
+
+        if current_batch and current_tokens + estimated_tokens > EMBEDDING_MAX_ESTIMATED_TOKENS_PER_REQUEST:
+            yield current_batch
+            current_batch = [text]
+            current_tokens = estimated_tokens
+            continue
+
+        current_batch.append(text)
+        current_tokens += estimated_tokens
+
+    if current_batch:
+        yield current_batch
+
+
 def get_embedding(text: str, model: str = EMBEDDING_MODEL) -> list[float]:
     """
     Generate embedding for a single text.
@@ -52,7 +96,7 @@ def get_embedding(text: str, model: str = EMBEDDING_MODEL) -> list[float]:
         return _offline_embedding(text)
 
     # Truncate if too long (embedding models have context limits)
-    truncated = text[:8000]
+    truncated = _truncate_for_embedding(text)
 
     response = client.embeddings.create(
         model=model,
@@ -76,15 +120,15 @@ def get_embeddings_batch(texts: list[str], model: str = EMBEDDING_MODEL) -> list
     if not texts:
         return []
 
-    # Truncate each text
-    truncated = [t[:8000] for t in texts]
+    embeddings: list[list[float]] = []
+    for batch in _iter_embedding_batches(texts):
+        response = client.embeddings.create(
+            model=model,
+            input=batch
+        )
+        embeddings.extend(item.embedding for item in response.data)
 
-    response = client.embeddings.create(
-        model=model,
-        input=truncated
-    )
-
-    return [item.embedding for item in response.data]
+    return embeddings
 
 
 def estimate_cost(texts: list[str], model: str = EMBEDDING_MODEL) -> float:

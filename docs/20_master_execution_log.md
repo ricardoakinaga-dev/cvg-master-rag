@@ -136,6 +136,108 @@ COMPLETED
 
 ---
 
+## ENTRY: LOCAL STACK STARTUP
+
+### TIMESTAMP
+2026-04-19 23:30
+
+### ENGINE
+LOCAL_RUNTIME
+
+### PHASE
+DEV_RUNTIME
+
+### SPRINT
+NONE
+
+### TASK
+Instalar dependências utilizáveis e subir a stack do projeto em localhost
+
+### ACTION
+Validar `src/venv`, rodar `pnpm install`, iniciar `qdrant_rag` em Docker e subir backend/frontend em portas livres (`8010` e `3000`)
+
+### RESULT
+- backend FastAPI respondendo em `http://localhost:8010/docs`
+- frontend Next.js respondendo em `http://localhost:3000`
+- Qdrant respondendo em `http://localhost:6333/readyz`
+- `pnpm build` concluído com sucesso
+- `pip install -r requirements.txt` não foi reaplicado integralmente porque o pin `qdrant-client==1.7.4` não resolve no ambiente atual; o `venv` existente já contém `qdrant-client 1.17.1` funcional
+
+### DECISIONS
+Foi mantido o ambiente virtual já funcional do projeto em vez de forçar downgrade/incompatibilidade do `qdrant-client` com Python 3.12
+
+### STATUS
+IN_PROGRESS
+
+---
+
+## ENTRY: LARGE DOCUMENT INGESTION FIX
+
+### TIMESTAMP
+2026-04-19 23:06
+
+### ENGINE
+BUILD_INCREMENTAL
+
+### PHASE
+LOCAL_RUNTIME
+
+### SPRINT
+NONE
+
+### TASK
+Corrigir falha de indexação em documentos grandes
+
+### ACTION
+Ajustar `services.embedding_service` para particionar requests de embeddings abaixo do limite de tokens por requisição e `services.vector_service` para enviar upserts ao Qdrant em lotes menores
+
+### RESULT
+- erro de embeddings `max_tokens_per_request` eliminado com batching
+- erro do Qdrant `JSON payload ... larger than allowed` eliminado com upserts em lote
+- upload autenticado de markdown grande (`4.429.801` caracteres, `4500` chunks) finalizado com status `parsed`
+- testes focados verdes: `22 passed`
+
+### DECISIONS
+O pipeline agora trata limites de payload dos provedores como restrição operacional explícita, em vez de assumir um único request por documento
+
+### STATUS
+COMPLETED
+
+---
+
+## ENTRY: LARGE INGESTION FIX PUBLISH
+
+### TIMESTAMP
+2026-04-19 23:15
+
+### ENGINE
+REPOSITORY_GOVERNANCE
+
+### PHASE
+GOVERNANCE
+
+### SPRINT
+NONE
+
+### TASK
+Versionar e publicar a correção de ingestão de documentos grandes
+
+### ACTION
+Registrar nos artefatos CVG a correção de batching de embeddings e de upsert no Qdrant, consolidar os testes focados e publicar o conjunto em `origin/main`
+
+### RESULT
+- correção consolidada em `services.embedding_service` e `services.vector_service`
+- testes focados passaram (`22 passed`)
+- publicação preparada com trilha de runtime e execution log atualizadas
+
+### DECISIONS
+`frontend/next-env.d.ts` foi tratado como ruído local do runtime e mantido fora do commit para preservar apenas mudanças funcionais e de governança
+
+### STATUS
+COMPLETED
+
+---
+
 ## ENTRY: FORMAL AUDIT REFRESH
 
 ### TIMESTAMP

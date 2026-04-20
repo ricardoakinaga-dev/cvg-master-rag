@@ -5,11 +5,11 @@
 ## CONTEXTO
 - project: cvg-master-rag
 - current_engine: REPOSITORY_GOVERNANCE
-- completion_status: ✅ REPOSITÓRIO PUBLICADO COM ESCOPOS AUXILIARES REMOVIDOS DO GIT
+- completion_status: ✅ CORREÇÃO DE INDEXAÇÃO GRANDE VALIDADA E PUBLICADA NO GITHUB
 
 ## POSIÇÃO ATUAL
-- current_phase: GOVERNANCE — REPOSITORY SCOPE NORMALIZED
-- current_task: BRIEFING e transcricao-yt removidos do versionamento para manter no GitHub apenas o escopo oficial do projeto
+- current_phase: GOVERNANCE — LARGE INGESTION FIX PUBLISHED
+- current_task: correção de batching para embeddings OpenAI e upserts do Qdrant registrada e publicada em origin/main
 
 ## STATUS
 - status: READY_FOR_NEXT_STEP
@@ -17,15 +17,15 @@
 - score_target: 96/100
 
 ## PROGRESSO
-- last_completed_action: diretórios auxiliares `BRIEFING/` e `transcricao-yt/` retirados do controle de versão e protegidos por `.gitignore`
-- next_action: Continuar evolução incremental apenas com artefatos canônicos do projeto no repositório remoto
+- last_completed_action: correção de indexação grande validada localmente e preparada para rastreabilidade oficial no repositório remoto
+- next_action: Monitorar novos uploads grandes e, se necessário, ajustar tuning fino de lote (`QDRANT_UPSERT_BATCH_SIZE`)
 
 ## BLOQUEIOS
 - blockers: none
 
 ## DECISÃO HUMANA
 - human_decision_required: no
-- decision_description: O repositório remoto passa a manter apenas artefatos canônicos; `BRIEFING/` e `transcricao-yt/` permanecem somente como contexto local
+- decision_description: A falha de indexação observada era causada por limites de payload em dois pontos distintos (OpenAI embeddings por requisição e Qdrant upsert por payload); ambos foram mitigados com batching local
 
 ## TIMESTAMP
 - last_update: 2026-04-19T23:15:00-03:00
@@ -55,6 +55,9 @@ O agente DEVE:
 | 2026-04-19 | BUILD_INCREMENTAL | COMPLETED | P1 | Retrieval profile oficial em backend/frontend sem regressão | COMPLETED |
 | 2026-04-19 | REPOSITORY_GOVERNANCE | COMPLETED | NONE | Initial git publish para GitHub com `.gitignore` e remoto oficial | COMPLETED |
 | 2026-04-19 | REPOSITORY_GOVERNANCE | COMPLETED | NONE | Remoção de `BRIEFING/` e `transcricao-yt/` do git remoto | COMPLETED |
+| 2026-04-19 | LOCAL_RUNTIME | IN_PROGRESS | NONE | Dependências validadas e stack local iniciada em localhost | IN_PROGRESS |
+| 2026-04-19 | BUILD_INCREMENTAL | COMPLETED | NONE | Correção de batching para embeddings OpenAI e upserts Qdrant em documentos grandes | COMPLETED |
+| 2026-04-19 | REPOSITORY_GOVERNANCE | COMPLETED | NONE | Publicação da correção de ingestão grande em `origin/main` | COMPLETED |
 
 ---
 

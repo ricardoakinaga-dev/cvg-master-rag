@@ -252,6 +252,88 @@ class TestDatasetValidation:
         assert overview["documents"] == 1
         assert overview["chunks"] == 1
 
+
+class TestEmbeddingBatching:
+    """Embedding batch requests must stay below provider request limits."""
+
+    def test_get_embeddings_batch_splits_large_payloads(self, monkeypatch):
+        import services.embedding_service as embedding_module
+
+        class FakeEmbeddingsAPI:
+            def __init__(self):
+                self.calls: list[list[str]] = []
+
+            def create(self, *, model, input):
+                self.calls.append(list(input))
+
+                class Item:
+                    def __init__(self, idx: int):
+                        self.embedding = [float(idx)] * 1536
+
+                class Response:
+                    def __init__(self, size: int):
+                        self.data = [Item(i) for i in range(size)]
+
+                return Response(len(input))
+
+        fake_api = FakeEmbeddingsAPI()
+        fake_client = type(
+            "FakeClient",
+            (),
+            {
+                "api_key": "test-key",
+                "embeddings": fake_api,
+            },
+        )()
+
+        monkeypatch.setattr(embedding_module, "client", fake_client)
+
+        # 80 texts * 8k chars ~= 213k estimated tokens with the conservative
+        # estimator, so this must split into at least 2 requests.
+        texts = ["a" * 8000 for _ in range(80)]
+        result = embedding_module.get_embeddings_batch(texts)
+
+        assert len(result) == len(texts)
+        assert len(fake_api.calls) >= 2
+        assert sum(len(call) for call in fake_api.calls) == len(texts)
+        assert all(
+            sum(embedding_module._estimate_tokens(text) for text in call)
+            <= embedding_module.EMBEDDING_MAX_ESTIMATED_TOKENS_PER_REQUEST
+            for call in fake_api.calls
+        )
+
+    def test_get_embeddings_batch_preserves_input_order_across_batches(self, monkeypatch):
+        import services.embedding_service as embedding_module
+
+        class FakeEmbeddingsAPI:
+            def create(self, *, model, input):
+                class Item:
+                    def __init__(self, text: str):
+                        self.embedding = [float(len(text))] * 1536
+
+                class Response:
+                    def __init__(self, payload: list[str]):
+                        self.data = [Item(text) for text in payload]
+
+                return Response(list(input))
+
+        fake_client = type(
+            "FakeClient",
+            (),
+            {
+                "api_key": "test-key",
+                "embeddings": FakeEmbeddingsAPI(),
+            },
+        )()
+
+        monkeypatch.setattr(embedding_module, "client", fake_client)
+
+        texts = ["a" * 1000, "b" * 2000, "c" * 8000] * 30
+        result = embedding_module.get_embeddings_batch(texts)
+
+        assert len(result) == len(texts)
+        assert [embedding[0] for embedding in result] == [float(len(text[:8000])) for text in texts]
+
     def test_dataset_categories_are_valid(self, dataset_raw):
         """All categories must be valid literals."""
         valid_categories = {'fato', 'procedimento', 'política', 'detalhes'}
@@ -3886,6 +3968,49 @@ class TestNeuralReranking:
         r = NeuralReranker()
         result = r.rerank("query", [])
         assert result == []
+
+
+class TestQdrantIndexBatching:
+    """Qdrant writes must be split to stay within payload limits."""
+
+    def test_index_chunks_sends_multiple_upserts_for_large_inputs(self, monkeypatch):
+        from models.schemas import Chunk
+        import services.vector_service as vector_module
+
+        class FakeClient:
+            def __init__(self):
+                self.upsert_calls = []
+
+            def upsert(self, *, collection_name, points):
+                self.upsert_calls.append((collection_name, list(points)))
+
+        fake_client = FakeClient()
+        monkeypatch.setattr(vector_module, "get_client", lambda: fake_client)
+        monkeypatch.setattr(vector_module, "ensure_collection", lambda *args, **kwargs: None)
+        monkeypatch.setattr(vector_module, "QDRANT_UPSERT_BATCH_SIZE", 2)
+
+        chunks = [
+            Chunk(
+                chunk_id=f"chunk-{idx}",
+                document_id="doc-1",
+                workspace_id="default",
+                chunk_index=idx,
+                text=f"conteudo {idx}",
+                start_char=0,
+                end_char=10,
+                page_hint=1,
+                strategy="recursive",
+                chunk_size_chars=10,
+                created_at="2026-04-19T00:00:00Z",
+            )
+            for idx in range(5)
+        ]
+        embeddings = [[0.1] * 1536 for _ in chunks]
+
+        vector_module.index_chunks(chunks, embeddings, workspace_id="default")
+
+        assert len(fake_client.upsert_calls) == 3
+        assert [len(points) for _, points in fake_client.upsert_calls] == [2, 2, 1]
 
 
 class TestSemanticChunking:

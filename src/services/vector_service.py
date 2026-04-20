@@ -65,6 +65,7 @@ MEANINGLESS_QUERY_TOKENS = {
 
 
 _client: Optional[QdrantClient] = None
+QDRANT_UPSERT_BATCH_SIZE = max(1, int(os.getenv("QDRANT_UPSERT_BATCH_SIZE", "128")))
 
 
 def _sparse_hash(token: str) -> int:
@@ -214,11 +215,13 @@ def index_chunks(
         )
         points.append(point)
 
-    # Batch upsert
-    client.upsert(
-        collection_name=QDRANT_COLLECTION,
-        points=points
-    )
+    # Large documents can exceed Qdrant's request payload limit if every point is
+    # sent in a single upsert. Split the write into smaller batches.
+    for start in range(0, len(points), QDRANT_UPSERT_BATCH_SIZE):
+        client.upsert(
+            collection_name=QDRANT_COLLECTION,
+            points=points[start:start + QDRANT_UPSERT_BATCH_SIZE]
+        )
 
 
 def _create_bm25_sparse(text: str) -> SparseVector:

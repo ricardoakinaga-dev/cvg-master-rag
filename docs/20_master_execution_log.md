@@ -33,6 +33,78 @@ COMPLETED
 
 ---
 
+## ENTRY: STRICT EXTRACTIVE REANSWER FOR CLINICAL GROUNDING
+
+### TIMESTAMP
+2026-04-20 03:45
+
+### ENGINE
+BUILD_INCREMENTAL
+
+### PHASE
+LOCAL_RUNTIME
+
+### SPRINT
+NONE
+
+### TASK
+Fazer a resposta clínica deixar de sair longa/sem grounding mesmo após o retrieval correto
+
+### ACTION
+Adicionar em `src/services/search_service.py` um segundo passe de geração com prompt mais estrito e extractivo quando o retrieval já estiver saudável, mas a primeira resposta clínica ainda vier com baixa cobertura de citação; cobrir o comportamento em `src/tests/test_sprint5.py` e validar com a query real `me dê um protocolo para convulsão em cão`
+
+### RESULT
+- a query real `me dê um protocolo para convulsão em cão` agora retorna um protocolo curto em bullets com grounding completo
+- runtime real validado com:
+  - `grounded: true`
+  - `citation_coverage: 1.0`
+  - `low_confidence: false`
+  - `needs_review: false`
+- chunks usados no topo da resposta: `1015`, `1014`, `1085`, `1027`, `1039`
+- testes focados verdes: `4 passed`
+
+### DECISIONS
+O reanswer estrito só entra para queries clínicas/prescritivas quando a primeira resposta ainda extrapola o contexto; assim o sistema preserva respostas completas em casos já saudáveis e endurece apenas o que estava quebrando a experiência de grounding
+
+### STATUS
+COMPLETED
+
+---
+
+## ENTRY: CROSSLINGUAL QUERY RECOVERY FOR CLINICAL PROTOCOL QUESTIONS
+
+### TIMESTAMP
+2026-04-20 00:58
+
+### ENGINE
+BUILD_INCREMENTAL
+
+### PHASE
+LOCAL_RUNTIME
+
+### SPRINT
+NONE
+
+### TASK
+Corrigir perguntas clínicas em português com formulação de "protocolo" que ainda caíam em `Não sei.`
+
+### ACTION
+Ajustar `src/services/search_service.py` para duas frentes: `protocolo` genérico deixa de ser tratado como lookup específico no modo adaptativo, e `/query` ganha um retry crosslingual controlado com hints clínicos em inglês quando a busca inicial continua em baixa confiança; cobrir ambos os comportamentos em `src/tests/test_sprint5.py`
+
+### RESULT
+- queries como `me dê um protocolo para convulsão em cão` agora geram uma segunda busca com bridge lexical para o corpus médico em inglês
+- o retry novo sobe chunks do capítulo `status epilepticus` e traz trechos terapêuticos (`1014`, `1015`, `1010`) para o topo em vez de ficar preso a contexto genérico
+- o modo adaptativo continua ignorando `protocolo 12345` como lookup específico, mas deixa de bloquear perguntas abertas com `protocolo`
+- testes focados verdes: `3 passed`
+
+### DECISIONS
+O recovery crosslingual fica restrito ao caminho `/query`, só entra após baixa confiança persistente e preserva o comportamento explícito de requests que já configuram reranking/query-expansion manualmente
+
+### STATUS
+COMPLETED
+
+---
+
 ## ENTRY: P0 CLOSEOUT TO 96
 
 ### TIMESTAMP
@@ -232,6 +304,40 @@ Registrar nos artefatos CVG a correção de batching de embeddings e de upsert n
 
 ### DECISIONS
 `frontend/next-env.d.ts` foi tratado como ruído local do runtime e mantido fora do commit para preservar apenas mudanças funcionais e de governança
+
+### STATUS
+COMPLETED
+
+---
+
+## ENTRY: DASHBOARD INVENTORY SYNC
+
+### TIMESTAMP
+2026-04-19 23:28
+
+### ENGINE
+BUILD_INCREMENTAL
+
+### PHASE
+LOCAL_RUNTIME
+
+### SPRINT
+NONE
+
+### TASK
+Corrigir números do dashboard para refletir a indexação operacional
+
+### ACTION
+Trocar o `/health` para usar `get_workspace_inventory` e ajustar `dashboard`/`app-shell` para exibir totais e breakdown entre corpus canônico e uploads operacionais
+
+### RESULT
+- `/health` passou a retornar `operational_documents` e `operational_chunks`
+- dashboard passou a mostrar total do workspace em vez de apenas corpus canônico
+- shell lateral e banner principal passaram a usar o mesmo inventário consolidado
+- validação verde: teste focado do health e `pnpm exec tsc --noEmit`
+
+### DECISIONS
+Uploads indexados via fluxo operacional continuam fora do “catálogo canônico”, mas agora entram corretamente na observabilidade do workspace
 
 ### STATUS
 COMPLETED
@@ -498,6 +604,148 @@ Implementado `retrieval_profile` oficial com quatro perfis (`hybrid`, `hyde_hybr
 
 ### DECISIONS
 Mudança mantida como incremento pós-96, sem reabrir gate nem alterar score oficial; quando o profile não é informado, o sistema preserva o comportamento legado por endpoint
+
+### STATUS
+COMPLETED
+
+---
+
+## ENTRY: MEDICAL CHUNK SIZE TUNING
+
+### TIMESTAMP
+2026-04-19 23:35
+
+### ENGINE
+BUILD_INCREMENTAL
+
+### PHASE
+LOCAL_RUNTIME
+
+### SPRINT
+NONE
+
+### TASK
+Elevar chunking padrão para corpus médico e validar impacto no chat
+
+### ACTION
+Atualizar o baseline de chunking para `CHUNK_SIZE=1200` e `CHUNK_OVERLAP=240`, alinhar `core.config`, `chunker`, `reindex_corpus`, `verify_setup`, `.env.example`, `README` e o `.env` local; reiniciar o backend e reindexar o documento médico operacional `ceeb49c4-9f6a-405d-b2ef-2bbba3f1313f`
+
+### RESULT
+- defaults do runtime passaram a ser `1200/240`
+- `verify_setup.py` validou o novo baseline em runtime
+- o PDF médico reindexado caiu de `1393` para `1150` chunks
+- distribuição dos chunks do PDF médico ficou em ~`1161.7` chars de média e ~`1163` chars de mediana
+- `/health?workspace_id=default` passou a reportar `operational_chunks: 5820`
+- a pergunta clínica no chat continuou falhando com `Não sei.`, mas agora o desvio observado no runtime atual aponta para retrieval heterogêneo no workspace, com chunks do documento operacional `9fd3ba1f-1906-4aae-8089-0829ba292653` dominando a busca padrão
+
+### DECISIONS
+Chunk maior foi mantido como baseline porque melhora a densidade contextual dos documentos médicos, mas o próximo ajuste relevante não é novo tuning de chunk size e sim revisão do retrieval/profile para workspace misto
+
+### STATUS
+COMPLETED
+
+---
+
+## ENTRY: RETRIEVAL DUPLICATE COLLAPSE
+
+### TIMESTAMP
+2026-04-19 23:48
+
+### ENGINE
+BUILD_INCREMENTAL
+
+### PHASE
+LOCAL_RUNTIME
+
+### SPRINT
+NONE
+
+### TASK
+Corrigir busca híbrida dominada por chunks repetitivos irrelevantes
+
+### ACTION
+Endurecer `src/services/vector_service.py` para deduplicar candidatos com texto idêntico no mesmo documento, ordenar o `top_k` pelo `confidence_score` efetivo e penalizar hits densos de baixíssima diversidade lexical quando não existe evidência sparse
+
+### RESULT
+- `/search` para `qual o tratamento para convulsão em cão?` deixou de retornar o documento operacional repetitivo de Pix no topo
+- os resultados agora passam a apontar para o documento médico `ceeb49c4-9f6a-405d-b2ef-2bbba3f1313f`
+- teste focado verde: `2 passed`
+- o `/query` ainda responde `Não sei.` porque a recuperação, embora agora esteja no documento correto, ainda não traz o trecho terapêutico mais específico nas primeiras posições
+
+### DECISIONS
+O ranking deixou de confiar apenas no RRF bruto quando ele está inflado por duplicação mecânica; para seleção final de resultados, o sistema agora privilegia o score efetivamente exposto ao usuário e elimina redundância óbvia antes do `top_k`
+
+### STATUS
+COMPLETED
+
+---
+
+## ENTRY: QUERY NEURAL FALLBACK
+
+### TIMESTAMP
+2026-04-19 23:56
+
+### ENGINE
+BUILD_INCREMENTAL
+
+### PHASE
+LOCAL_RUNTIME
+
+### SPRINT
+NONE
+
+### TASK
+Melhorar a segunda camada do chat quando a primeira busca retorna contexto fraco
+
+### ACTION
+Ajustar `src/services/search_service.py` para que `/query` faça um retry automático com `reranking_method=neural` quando a primeira rodada de retrieval vier com `low_confidence=true` e o usuário não tiver pedido um reranking explícito
+
+### RESULT
+- a mesma pergunta clínica `qual o tratamento para convulsão em cão?` deixou de retornar `Não sei.`
+- o fallback passou a selecionar chunks médicos como `1009`, `1022` e `0380` do documento `ceeb49c4-9f6a-405d-b2ef-2bbba3f1313f`
+- teste focado verde: `2 passed`
+- a resposta continua marcada com `grounded=false`/`low_confidence=true` porque o grounding atual depende de overlap lexical entre resposta em português e citações em inglês
+
+### DECISIONS
+O retry neural fica restrito a casos de baixa confiança e só entra quando o usuário não configurou manualmente o reranking, preservando controle explícito da API e evitando custo extra em queries saudáveis
+
+### STATUS
+COMPLETED
+
+---
+
+## ENTRY: MULTILINGUAL GROUNDING HARDENING
+
+### TIMESTAMP
+2026-04-20 00:08
+
+### ENGINE
+BUILD_INCREMENTAL
+
+### PHASE
+LOCAL_RUNTIME
+
+### SPRINT
+NONE
+
+### TASK
+Corrigir grounding para respostas em português sobre citações em inglês
+
+### ACTION
+Endurecer `src/services/grounding_service.py` para validar claims usando unidades menores da citação, fallback semântico com embeddings e overlap de cognatos longos entre línguas próximas; cobrir o comportamento em `src/tests/test_sprint5.py`
+
+### RESULT
+- `verify_grounding` deixou de depender apenas de overlap lexical literal
+- teste focado verde: `3 passed`
+- a query real `qual o tratamento para convulsão em cão?` agora retorna:
+  - `grounded: true`
+  - `citation_coverage: 1.0`
+  - `low_confidence: false`
+  - `needs_review: false`
+- o retry neural continua sendo o método de retrieval usado para essa query (`reranking_method=neural`)
+
+### DECISIONS
+O grounding multilíngue permanece conservador offline porque o fallback semântico só entra quando embeddings estão disponíveis; sem embeddings, o sistema ainda fica ancorado nos checks lexicais e de contexto
 
 ### STATUS
 COMPLETED

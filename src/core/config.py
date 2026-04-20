@@ -34,8 +34,8 @@ LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
 SESSION_TTL_HOURS = int(os.getenv("SESSION_TTL_HOURS", "8"))
 
 # Chunking config
-CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
-CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1200"))
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "240"))
 
 # Retrieval config
 DEFAULT_TOP_K = int(os.getenv("DEFAULT_TOP_K", "5"))

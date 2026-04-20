@@ -21,6 +21,8 @@ from core.config import (
     QDRANT_HOST,
     QDRANT_PORT,
     QDRANT_CHECK_COMPATIBILITY,
+    CHUNK_SIZE,
+    CHUNK_OVERLAP,
 )
 from services.embedding_service import get_embeddings_batch
 from services.chunker import recursive_chunk
@@ -128,8 +130,8 @@ def full_reindex(
         # Re-chunk
         chunks = recursive_chunk(
             normalized,
-            chunk_size=1000,
-            overlap=200,
+            chunk_size=CHUNK_SIZE,
+            overlap=CHUNK_OVERLAP,
             workspace_id=workspace_id
         )
         print(f"  Chunks: {len(chunks)}")

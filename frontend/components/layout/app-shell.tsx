@@ -96,6 +96,12 @@ function AppShellFrame({ children }: { children: ReactNode }) {
   const activeWorkspaceLabel = session?.active_tenant.workspace_id ?? "carregando";
   const availableTenants = session?.available_tenants ?? [];
   const navItems = getAllowedNavItems(session.user.role);
+  const canonicalDocuments = health?.corpus?.documents ?? 0;
+  const canonicalChunks = health?.corpus?.chunks ?? 0;
+  const operationalDocuments = health?.corpus?.operational_documents ?? 0;
+  const operationalChunks = health?.corpus?.operational_chunks ?? 0;
+  const totalDocuments = canonicalDocuments + operationalDocuments;
+  const totalChunks = canonicalChunks + operationalChunks;
 
   return (
     <div className="app-shell">
@@ -137,11 +143,11 @@ function AppShellFrame({ children }: { children: ReactNode }) {
           <Card className="card-inner">
             <div className="card-title">
               <strong>Estado do corpus</strong>
-              <span>{health?.corpus ? `${formatNumber(health.corpus.documents)} documentos` : "carregando"}</span>
+              <span>{health?.corpus ? `${formatNumber(totalDocuments)} documentos` : "carregando"}</span>
             </div>
             <p className="thin">
               {health?.corpus
-                ? `${formatNumber(health.corpus.chunks)} chunks · ${formatNumber(health.corpus.parsed_documents)} parsed`
+                ? `${formatNumber(totalChunks)} chunks · ${formatNumber(canonicalDocuments)} canônicos · ${formatNumber(operationalDocuments)} operacionais`
                 : "Aguardando resposta do healthcheck"}
             </p>
           </Card>
@@ -251,11 +257,11 @@ function AppShellFrame({ children }: { children: ReactNode }) {
               <div className="state-box">
                 <h3>Corpus ativo</h3>
                 <p>
-                  {formatNumber(health.corpus.documents)} documentos · {formatNumber(health.corpus.chunks)} chunks ·
+                  {formatNumber(totalDocuments)} documentos · {formatNumber(totalChunks)} chunks ·
                   Qdrant {health.qdrant?.workspace_points ?? "?"} pontos do workspace
                 </p>
                 <p className="thin">
-                  Parsed {formatNumber(health.corpus.parsed_documents)} · partial {formatNumber(health.corpus.partial_documents)} · coleção{" "}
+                  Canônico {formatNumber(canonicalDocuments)} / Operacional {formatNumber(operationalDocuments)} · Parsed {formatNumber(health.corpus.parsed_documents)} · partial {formatNumber(health.corpus.partial_documents)} · coleção{" "}
                   {health.qdrant?.collection ?? "?"}
                 </p>
               </div>

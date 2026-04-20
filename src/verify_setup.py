@@ -95,7 +95,12 @@ try:
         raw_json_path=""
     )
 
-    chunks = recursive_chunk(test_doc, chunk_size=1000, overlap=200, workspace_id="default")
+    chunks = recursive_chunk(
+        test_doc,
+        chunk_size=CHUNK_SIZE,
+        overlap=CHUNK_OVERLAP,
+        workspace_id="default",
+    )
     print(f"    Chunking OK — {len(chunks)} chunks gerados")
     for i, c in enumerate(chunks[:3]):
         print(f"    Chunk {i}: {c.chunk_id}, size={c.chunk_size_chars}chars")

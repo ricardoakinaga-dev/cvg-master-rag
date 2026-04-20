@@ -10,8 +10,13 @@ Ref: 0016-backlog-priorizado.md (P2 - Grounding controls)
      0011-contratos-de-avaliacao.md (Contrato 3: Grounded Answer)
 """
 import re
+import unicodedata
 from typing import Optional
 from models.schemas import Citation
+
+SEMANTIC_GROUNDING_THRESHOLD = 0.62
+SEMANTIC_GROUNDING_STRICT_THRESHOLD = 0.72
+_SEMANTIC_EMBED_CACHE: dict[str, list[float]] = {}
 
 
 # Frases que indicam claims factuais (precisam de citação)
@@ -89,32 +94,10 @@ def calculate_citation_coverage(
         # If this sentence has factual claims, check if it's cited
         if is_factual_claim(sentence):
             # Check if any citation covers this sentence
-            sentence_cited = False
-            for citation in citations:
-                citation_text_lower = citation.text.lower()
-                citation_text = citation.text
-
-                # Check word overlap
-                words = set(re.findall(r"\b\w{4,}\b", sentence.lower()))
-                citation_words = set(re.findall(r"\b\w{4,}\b", citation_text_lower))
-                overlap = words & citation_words
-
-                # Also check for number/percentage overlap (for short claims like "1,99%")
-                numbers_in_sentence = set(re.findall(r"[\d,.]+", sentence))
-                numbers_in_citation = set(re.findall(r"[\d,.]+", citation_text))
-                number_overlap = numbers_in_sentence & numbers_in_citation
-
-                # Citation covers sentence if:
-                # - 3+ word overlap, OR
-                # - 1+ word overlap AND 1+ number overlap (for short factual claims)
-                if len(overlap) >= 3:
-                    sentence_cited = True
-                elif len(overlap) >= 1 and len(number_overlap) >= 1:
-                    sentence_cited = True
-                elif _sentence_contains_context(citation_text, sentence):
-                    # Check if key context words appear
-                    sentence_cited = True
-
+            sentence_cited = any(
+                _citation_supports_sentence(sentence, citation.text)
+                for citation in citations
+            )
             if sentence_cited:
                 cited_sentences += 1
 
@@ -140,6 +123,133 @@ def _sentence_contains_context(citation_text: str, sentence: str) -> bool:
     # Check if at least 2 key words appear in citation
     key_words_found = sum(1 for w in words if w in citation_lower)
     return key_words_found >= 2
+
+
+def _split_citation_units(text: str) -> list[str]:
+    """Split long citation text into smaller semantic units."""
+    units: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip(" -*\t")
+        if not line:
+            continue
+        parts = re.split(r"(?<=[.!?])\s+", line)
+        for part in parts:
+            sentence = part.strip()
+            if sentence:
+                units.append(sentence)
+    return units or [text]
+
+
+def _normalize_token(token: str) -> str:
+    base = unicodedata.normalize("NFKD", token.lower())
+    return "".join(ch for ch in base if not unicodedata.combining(ch))
+
+
+def _shared_prefix_len(left: str, right: str) -> int:
+    count = 0
+    for a, b in zip(left, right):
+        if a != b:
+            break
+        count += 1
+    return count
+
+
+def _cognate_overlap_count(sentence: str, citation_text: str) -> int:
+    sentence_tokens = {
+        _normalize_token(tok)
+        for tok in re.findall(r"\b[\wÀ-ÿ]{5,}\b", sentence)
+    }
+    citation_tokens = {
+        _normalize_token(tok)
+        for tok in re.findall(r"\b[\wÀ-ÿ]{5,}\b", citation_text)
+    }
+    overlaps = 0
+    used_citation_tokens: set[str] = set()
+    for sentence_token in sentence_tokens:
+        for citation_token in citation_tokens:
+            if citation_token in used_citation_tokens:
+                continue
+            if sentence_token == citation_token:
+                overlaps += 1
+                used_citation_tokens.add(citation_token)
+                break
+            if _shared_prefix_len(sentence_token, citation_token) >= 6:
+                overlaps += 1
+                used_citation_tokens.add(citation_token)
+                break
+    return overlaps
+
+
+def _number_overlap(sentence: str, citation_text: str) -> set[str]:
+    numbers_in_sentence = set(re.findall(r"[\d,.]+", sentence))
+    numbers_in_citation = set(re.findall(r"[\d,.]+", citation_text))
+    return numbers_in_sentence & numbers_in_citation
+
+
+def _semantic_similarity(text_a: str, text_b: str) -> float:
+    """
+    Cross-lingual semantic similarity fallback for grounding.
+
+    This only runs when lexical checks fail. If embeddings are unavailable, the
+    function degrades safely to 0.0 so grounding remains conservative offline.
+    """
+    try:
+        from services.embedding_service import get_embedding, client as embedding_client
+    except Exception:
+        return 0.0
+
+    if not getattr(embedding_client, "api_key", ""):
+        return 0.0
+
+    def _embed(text: str) -> list[float]:
+        normalized = re.sub(r"\s+", " ", text.strip())
+        if normalized not in _SEMANTIC_EMBED_CACHE:
+            _SEMANTIC_EMBED_CACHE[normalized] = get_embedding(normalized[:1500])
+        return _SEMANTIC_EMBED_CACHE[normalized]
+
+    try:
+        emb_a = _embed(text_a)
+        emb_b = _embed(text_b)
+    except Exception:
+        return 0.0
+
+    dot = sum(x * y for x, y in zip(emb_a, emb_b))
+    norm_a = sum(x * x for x in emb_a) ** 0.5
+    norm_b = sum(x * x for x in emb_b) ** 0.5
+    if norm_a <= 0 or norm_b <= 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+def _citation_supports_sentence(sentence: str, citation_text: str) -> bool:
+    """Return True when a citation lexically or semantically supports a sentence."""
+    for citation_unit in _split_citation_units(citation_text):
+        sentence_lower = sentence.lower()
+        citation_text_lower = citation_unit.lower()
+
+        words = set(re.findall(r"\b\w{4,}\b", sentence_lower))
+        citation_words = set(re.findall(r"\b\w{4,}\b", citation_text_lower))
+        overlap = words & citation_words
+        number_overlap = _number_overlap(sentence, citation_unit)
+        cognate_overlap = _cognate_overlap_count(sentence, citation_unit)
+
+        if len(overlap) >= 3:
+            return True
+        if len(overlap) >= 1 and len(number_overlap) >= 1:
+            return True
+        if cognate_overlap >= 2:
+            return True
+        if cognate_overlap >= 1 and len(number_overlap) >= 1:
+            return True
+        if _sentence_contains_context(citation_unit, sentence):
+            return True
+
+        semantic_score = _semantic_similarity(sentence, citation_unit)
+        if number_overlap and semantic_score >= SEMANTIC_GROUNDING_THRESHOLD:
+            return True
+        if semantic_score >= SEMANTIC_GROUNDING_STRICT_THRESHOLD:
+            return True
+    return False
 
 
 def verify_grounding(
@@ -188,26 +298,10 @@ def verify_grounding(
 
         if is_factual_claim(sentence):
             # Check if this sentence is covered by any citation
-            is_cited = False
-            for citation in citations:
-                citation_text_lower = citation.text.lower()
-
-                words = set(re.findall(r"\b\w{4,}\b", sentence.lower()))
-                citation_words = set(re.findall(r"\b\w{4,}\b", citation_text_lower))
-                overlap = words & citation_words
-
-                # Also check number overlap
-                numbers_in_sentence = set(re.findall(r"[\d,.]+", sentence))
-                numbers_in_citation = set(re.findall(r"[\d,.]+", citation.text))
-                number_overlap = numbers_in_sentence & numbers_in_citation
-
-                if len(overlap) >= 3:
-                    is_cited = True
-                elif len(overlap) >= 1 and len(number_overlap) >= 1:
-                    is_cited = True
-                elif _sentence_contains_context(citation.text, sentence):
-                    is_cited = True
-
+            is_cited = any(
+                _citation_supports_sentence(sentence, citation.text)
+                for citation in citations
+            )
             if not is_cited:
                 uncited.append(sentence)
 

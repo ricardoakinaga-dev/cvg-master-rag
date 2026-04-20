@@ -1,5 +1,5 @@
 """
-Recursive Chunker — chunk_size=1000, overlap=200
+Recursive Chunker — chunk_size=1200, overlap=240
 Respects word boundaries, prefers paragraph breaks.
 """
 import re
@@ -12,8 +12,8 @@ from models.schemas import Chunk, NormalizedDocument
 
 def recursive_chunk(
     normalized_doc: NormalizedDocument,
-    chunk_size: int = 1000,
-    overlap: int = 200,
+    chunk_size: int = 1200,
+    overlap: int = 240,
     workspace_id: str = "default"
 ) -> list[Chunk]:
     """

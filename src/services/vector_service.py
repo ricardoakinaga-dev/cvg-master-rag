@@ -85,6 +85,47 @@ def _tokenize_terms(text: str, min_len: int = 2) -> list[str]:
     return tokens
 
 
+def _lexical_diversity_ratio(text: str) -> float:
+    """
+    Estimate how repetitive a chunk is.
+
+    Very repetitive operational chunks can dominate dense retrieval even when they
+    carry almost no discriminative signal for the query. We only penalize this
+    pattern for dense-only evidence later on.
+    """
+    tokens = _tokenize_terms(text, min_len=2)
+    if len(tokens) < 20:
+        return 1.0
+    return len(set(tokens)) / len(tokens)
+
+
+def _candidate_fingerprint(item: dict) -> tuple[str, str]:
+    """
+    Build a stable fingerprint for near-duplicate candidates.
+
+    We deduplicate within the same document so that repeated chunks with identical
+    text do not consume the entire top-k.
+    """
+    text = re.sub(r"\s+", " ", str(item.get("text", "")).strip().lower())
+    return (str(item.get("document_id") or ""), text)
+
+
+def _dedupe_redundant_candidates(candidates: list[dict]) -> list[dict]:
+    """Keep the strongest candidate for each document/text fingerprint."""
+    deduped: dict[tuple[str, str], dict] = {}
+    for item in candidates:
+        fingerprint = _candidate_fingerprint(item)
+        current = deduped.get(fingerprint)
+        if current is None:
+            deduped[fingerprint] = item
+            continue
+        current_score = float(current.get("confidence_score", current.get("score", 0.0)) or 0.0)
+        item_score = float(item.get("confidence_score", item.get("score", 0.0)) or 0.0)
+        if item_score > current_score:
+            deduped[fingerprint] = item
+    return list(deduped.values())
+
+
 def _qdrant_host_reachable(timeout: float = 0.25) -> bool:
     try:
         with socket.create_connection((QDRANT_HOST, QDRANT_PORT), timeout=timeout):
@@ -322,6 +363,14 @@ def search_hybrid(
             doc_meta = metadata_map.get(item.get("document_id"), {})
             item["document_filename"] = doc_meta.get("filename")
             item["tags"] = doc_meta.get("tags") or []
+    fused = _dedupe_redundant_candidates(fused)
+    fused.sort(
+        key=lambda item: (
+            float(item.get("confidence_score", 0.0) or 0.0),
+            float(item.get("score", 0.0) or 0.0),
+        ),
+        reverse=True,
+    )
 
     # 4b. Optional reranking — runs on all candidates before top-k cut
     # Applies if: request explicitly requests it, OR global config enables it and request doesn't override
@@ -732,6 +781,7 @@ def _compute_confidence_score(item: dict) -> float:
     dense = float(item.get("dense_score", 0.0) or 0.0)
     sparse = float(item.get("sparse_score", 0.0) or 0.0)
     rrf = float(item.get("score", 0.0) or 0.0)
+    diversity = _lexical_diversity_ratio(item.get("text", ""))
 
     if dense <= 0 and sparse <= 0:
         return max(0.0, min(1.0, rrf))
@@ -742,7 +792,13 @@ def _compute_confidence_score(item: dict) -> float:
         combined = stronger + (weaker * 0.2)
         return max(0.0, min(1.0, combined))
 
-    return max(0.0, min(1.0, max(dense, sparse)))
+    score = max(dense, sparse)
+    if dense > 0 and sparse <= 0:
+        # Dense-only hits with extremely repetitive text are usually spurious.
+        if diversity < 0.2:
+            score *= max(0.1, diversity / 0.2)
+
+    return max(0.0, min(1.0, score))
 
 
 class NeuralReranker:

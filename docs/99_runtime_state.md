@@ -4,31 +4,31 @@
 
 ## CONTEXTO
 - project: cvg-master-rag
-- current_engine: REPOSITORY_GOVERNANCE
-- completion_status: ✅ CORREÇÃO DE INDEXAÇÃO GRANDE VALIDADA E PUBLICADA NO GITHUB
+- current_engine: BUILD_INCREMENTAL
+- completion_status: ✅ QUERY CLÍNICA DE "PROTOCOLO" RESPONDE COM GROUNDING E CITAÇÕES
 
 ## POSIÇÃO ATUAL
-- current_phase: GOVERNANCE — LARGE INGESTION FIX PUBLISHED
-- current_task: correção de batching para embeddings OpenAI e upserts do Qdrant registrada e publicada em origin/main
+- current_phase: LOCAL_RUNTIME — CLINICAL QUERY ANSWERING HARDENED
+- current_task: `/query` combina retry crosslingual em baixa confiança com um segundo passe extractivo estrito quando a primeira resposta clínica ainda extrapola as citações
 
 ## STATUS
-- status: READY_FOR_NEXT_STEP
+- status: IN_PROGRESS
 - maturity: 96%
 - score_target: 96/100
 
 ## PROGRESSO
-- last_completed_action: correção de indexação grande validada localmente e preparada para rastreabilidade oficial no repositório remoto
-- next_action: Monitorar novos uploads grandes e, se necessário, ajustar tuning fino de lote (`QDRANT_UPSERT_BATCH_SIZE`)
+- last_completed_action: `search_service` passou a fazer um segundo passe extractivo estrito quando a busca clínica está boa, mas a primeira resposta ainda fica pouco ancorada; após o retry crosslingual e o reanswer estrito, a query real `me dê um protocolo para convulsão em cão` retornou `grounded=true`, `citation_coverage=1.0`, `low_confidence=false` e `needs_review=false`
+- next_action: consolidar/publicar o conjunto local de correções de retrieval + grounding quando desejado e monitorar se outras formulações clínicas precisam do mesmo padrão de reanswer estrito
 
 ## BLOQUEIOS
 - blockers: none
 
 ## DECISÃO HUMANA
 - human_decision_required: no
-- decision_description: A falha de indexação observada era causada por limites de payload em dois pontos distintos (OpenAI embeddings por requisição e Qdrant upsert por payload); ambos foram mitigados com batching local
+- decision_description: O reanswer estrito entra apenas quando o retrieval já está saudável e a primeira resposta ainda extrapola o contexto; isso melhora grounding sem mudar a semântica do contrato de retrieval nem forçar custo extra em queries já boas
 
 ## TIMESTAMP
-- last_update: 2026-04-19T23:15:00-03:00
+- last_update: 2026-04-20T03:45:00-03:00
 
 ---
 
@@ -58,6 +58,13 @@ O agente DEVE:
 | 2026-04-19 | LOCAL_RUNTIME | IN_PROGRESS | NONE | Dependências validadas e stack local iniciada em localhost | IN_PROGRESS |
 | 2026-04-19 | BUILD_INCREMENTAL | COMPLETED | NONE | Correção de batching para embeddings OpenAI e upserts Qdrant em documentos grandes | COMPLETED |
 | 2026-04-19 | REPOSITORY_GOVERNANCE | COMPLETED | NONE | Publicação da correção de ingestão grande em `origin/main` | COMPLETED |
+| 2026-04-19 | BUILD_INCREMENTAL | COMPLETED | NONE | Dashboard e shell alinhados com inventário operacional do workspace | COMPLETED |
+| 2026-04-19 | BUILD_INCREMENTAL | COMPLETED | NONE | Chunking padrão elevado para `1200/240` com reindexação do PDF médico e diagnóstico do retrieval heterogêneo | COMPLETED |
+| 2026-04-19 | BUILD_INCREMENTAL | COMPLETED | NONE | Ranking híbrido endurecido contra chunks repetitivos irrelevantes no topo do `/search` | COMPLETED |
+| 2026-04-19 | BUILD_INCREMENTAL | COMPLETED | NONE | `/query` endurecido com retry automático via neural reranking para perguntas clínicas em baixa confiança | COMPLETED |
+| 2026-04-20 | BUILD_INCREMENTAL | COMPLETED | NONE | Grounding multilíngue endurecido com unidades menores, similaridade semântica e cognatos | COMPLETED |
+| 2026-04-20 | BUILD_INCREMENTAL | COMPLETED | NONE | Recovery crosslingual adicionado ao `/query` para formulações clínicas com `protocolo` em português | COMPLETED |
+| 2026-04-20 | BUILD_INCREMENTAL | COMPLETED | NONE | Reanswer extractivo estrito adicionado para elevar grounding em respostas clínicas | COMPLETED |
 
 ---
 

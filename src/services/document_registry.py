@@ -103,8 +103,11 @@ def list_workspace_items(workspace_id: str = "default", catalog_scope: Optional[
 
 
 def get_document_metadata(document_id: str, workspace_id: str = "default") -> Optional[dict]:
-    """Return metadata for a single document from the canonical registry."""
-    return get_document_registry(workspace_id).get(document_id)
+    """Return metadata for a single document from the workspace inventory."""
+    for item in _load_workspace_items(workspace_id):
+        if item.get("document_id") == document_id:
+            return item
+    return None
 
 
 def list_document_items(
@@ -115,8 +118,8 @@ def list_document_items(
     status: Optional[str] = None,
     query: Optional[str] = None,
 ) -> dict:
-    """Return a paginated, filterable document list from the canonical registry."""
-    registry = list(get_document_registry(workspace_id).values())
+    """Return a paginated, filterable document list from the workspace inventory."""
+    registry = list(_load_workspace_items(workspace_id))
 
     if source_type:
         registry = [item for item in registry if item.get("source_type") == source_type]

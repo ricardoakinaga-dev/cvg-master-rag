@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from models.schemas import QueryRequest, QueryResponse, SearchRequest, SearchResponse, Citation, GroundingReport
 from services.vector_service import search_hybrid
-from services.llm_service import generate_answer, estimate_answer_cost
+from services.llm_service import generate_answer, estimate_answer_cost, client as llm_client
 from services.grounding_service import verify_grounding, enrich_citations_with_filename
 from core.config import LOGS_DIR
 from services.telemetry_service import get_telemetry
@@ -17,6 +17,19 @@ from core.config import QUERY_EXPANSION_ENABLED
 
 HYDE_SYSTEM_PROMPT = "Você é um assistente que escreve respostas factuais breves para ajudar na busca de documentos."
 HYDE_USER_PROMPT_TEMPLATE = "Given the question below, write a brief factual answer (2-3 sentences) that would help retrieve relevant documents. Answer ONLY with facts — do not speculate beyond what is directly implied by the question.\n\nQuestion: {query}\nAnswer:"
+STRICT_GROUNDED_SYSTEM_PROMPT = """Você é um assistente de IA que responde perguntas
+usando SOMENTE o contexto fornecido abaixo.
+
+Responda apenas com fatos explicitamente suportados pelos trechos.
+Prefira uma resposta curta e altamente extractiva:
+- no máximo 4 bullets curtos ou 1 parágrafo curto
+- não invente etapas ausentes
+- não una partes desconexas em um protocolo mais amplo
+- se o contexto cobrir só parte da resposta, diga apenas essa parte
+
+Se a informação do contexto não for suficiente para responder,
+diga "Não sei" — não invente resposta.
+Responda em português."""
 LOW_CONFIDENCE_GROUNDING_OVERRIDE_THRESHOLD = 0.8
 RETRIEVAL_PROFILE_TO_EXPANSION_MODE = {
     "hybrid": "off",
@@ -31,7 +44,31 @@ _SPECIFIC_LOOKUP_PATTERNS = [
     r"\b\d{4,}\b",        # long numbers (years, IDs, phone numbers)
     r"\b\d+/\d+\b",       # dates or ratios
     r"\b[A-Z]{2,}\d+\b",  # uppercase code prefixes followed by digits (e.g. PROJ123)
-    r"\b(art\.?|artigo|nº|número|protocolo|ref\.?|processo)\b",  # specific reference terms
+    r"\b(art\.?|artigo|nº|número|ref\.?|processo)\b",  # specific reference terms
+]
+_PROTOCOL_LOOKUP_PATTERN = r"\bprotocolo(?:\s*(?:n[ºo.]?|#|:|-))?\s*(?:\d{3,}|[A-Z]{2,}\d+)\b"
+_SEIZURE_QUERY_PATTERN = r"\b(convuls(?:ão|ao|ões|oes)|crises?\s+convuls(?:ivas?|ivos?)|epilepsia|epiléptic[ao]s?)\b"
+_CANINE_QUERY_PATTERN = r"\b(c[aã]o|c[aã]es|canin[ao]s?)\b"
+_FELINE_QUERY_PATTERN = r"\b(gat[oa]s?|felin[ao]s?)\b"
+_TREATMENT_QUERY_PATTERN = r"\b(tratament(?:o|os)|protocolos?|manejo|conduta|emerg[êe]ncia|anticonvulsiv(?:ante|antes))\b"
+_CROSSLINGUAL_QUERY_ALIASES = [
+    (_SEIZURE_QUERY_PATTERN, ["seizure", "seizures", "epileptic"]),
+    (_CANINE_QUERY_PATTERN, ["dog", "dogs", "canine"]),
+    (_FELINE_QUERY_PATTERN, ["cat", "cats", "feline"]),
+    (r"\btratament(?:o|os)\b", ["treatment", "management"]),
+    (r"\bprotocolos?\b", ["protocol", "management", "approach"]),
+    (r"\bmanejo\b", ["management"]),
+    (r"\bconduta\b", ["approach", "management"]),
+    (r"\bemerg[êe]ncia\b", ["emergency"]),
+    (r"\banticonvulsiv(?:ante|antes)\b", ["anticonvulsant", "antiepileptic"]),
+]
+_SEIZURE_PROTOCOL_HINTS = [
+    "status epilepticus",
+    "acute repetitive seizures",
+    "benzodiazepine",
+    "diazepam",
+    "midazolam",
+    "anticonvulsant",
 ]
 
 
@@ -53,6 +90,8 @@ def _should_expand_adaptive(query: str) -> tuple[bool, str]:
     import re
 
     # Rule 1: specific lookup patterns → skip
+    if re.search(_PROTOCOL_LOOKUP_PATTERN, query, re.IGNORECASE):
+        return False, "specific_lookup"
     for pattern in _SPECIFIC_LOOKUP_PATTERNS:
         if re.search(pattern, query, re.IGNORECASE):
             return False, "specific_lookup"
@@ -148,6 +187,130 @@ def _merge_retrieval_filters(filters: dict | None, semantic_only: bool) -> dict 
     if semantic_only:
         merged["strategy"] = "semantic"
     return merged or None
+
+
+def _should_try_neural_query_retry(request: QueryRequest, search_resp: SearchResponse) -> bool:
+    """Limit expensive neural reranking fallback to ambiguous query-time failures."""
+    if request.reranking is not None:
+        return False
+    if request.reranking_method is not None:
+        return False
+    if search_resp.reranking_applied:
+        return False
+    if not search_resp.results:
+        return False
+    return bool(search_resp.low_confidence)
+
+
+def _should_accept_neural_retry(original: SearchResponse, retry: SearchResponse) -> bool:
+    """Accept a retry when it materially improves the candidate set."""
+    if not retry.results:
+        return False
+    if not original.results:
+        return True
+    if original.low_confidence and not retry.low_confidence:
+        return True
+
+    original_top = float(original.results[0].score or 0.0)
+    retry_top = float(retry.results[0].score or 0.0)
+    original_ids = [item.chunk_id for item in original.results[:3]]
+    retry_ids = [item.chunk_id for item in retry.results[:3]]
+
+    if retry_top > original_top + 0.01:
+        return True
+    if retry_top > original_top and retry_ids != original_ids:
+        return True
+    if retry_ids and retry_ids != original_ids:
+        return True
+    return False
+
+
+def _build_crosslingual_retrieval_query(query: str) -> tuple[str | None, str | None]:
+    """
+    Build a lightweight multilingual bridge query for low-confidence retrieval.
+
+    This is intentionally conservative and only appends a small glossary of
+    English aliases when the original query already carries matching Portuguese
+    concepts. It helps Portuguese questions hit English medical corpora without
+    changing the user-visible query or globally enabling aggressive expansion.
+    """
+    import re
+
+    normalized_query = query.strip()
+    if not normalized_query:
+        return None, None
+
+    lowered_query = normalized_query.lower()
+    additions: list[str] = []
+
+    for pattern, aliases in _CROSSLINGUAL_QUERY_ALIASES:
+        if not re.search(pattern, lowered_query, re.IGNORECASE):
+            continue
+        for alias in aliases:
+            if alias.lower() in lowered_query:
+                continue
+            if alias not in additions:
+                additions.append(alias)
+
+    if (
+        re.search(_SEIZURE_QUERY_PATTERN, lowered_query, re.IGNORECASE)
+        and (
+            re.search(_CANINE_QUERY_PATTERN, lowered_query, re.IGNORECASE)
+            or re.search(_FELINE_QUERY_PATTERN, lowered_query, re.IGNORECASE)
+        )
+        and re.search(_TREATMENT_QUERY_PATTERN, lowered_query, re.IGNORECASE)
+    ):
+        for hint in _SEIZURE_PROTOCOL_HINTS:
+            if hint not in additions and hint.lower() not in lowered_query:
+                additions.append(hint)
+
+    if not additions:
+        return None, None
+
+    return f"{normalized_query} {' '.join(additions)}", "crosslingual_glossary"
+
+
+def _should_try_crosslingual_retry(request: QueryRequest, search_resp: SearchResponse) -> bool:
+    """Use glossary-based recovery only after retrieval still looks ambiguous."""
+    if not search_resp.low_confidence:
+        return False
+    retry_query, _ = _build_crosslingual_retrieval_query(request.query)
+    return bool(retry_query and retry_query.strip() != request.query.strip())
+
+
+def _should_try_grounded_reanswer(
+    request: QueryRequest,
+    retrieval_low_confidence: bool,
+    grounding_result: GroundingReport,
+) -> bool:
+    """
+    Retry answer generation with a stricter extractive prompt when retrieval is
+    good enough but the first answer still overreaches the citations.
+    """
+    import re
+
+    if retrieval_low_confidence:
+        return False
+    if grounding_result.grounded:
+        return False
+    if not getattr(llm_client, "api_key", ""):
+        return False
+    if grounding_result.citation_coverage >= LOW_CONFIDENCE_GROUNDING_OVERRIDE_THRESHOLD:
+        return False
+    return bool(re.search(_TREATMENT_QUERY_PATTERN, request.query, re.IGNORECASE))
+
+
+def _should_accept_grounded_reanswer(
+    original: GroundingReport,
+    retry: GroundingReport,
+) -> bool:
+    if retry.grounded and not original.grounded:
+        return True
+    if retry.citation_coverage >= original.citation_coverage + 0.15:
+        return True
+    if len(retry.uncited_claims) < len(original.uncited_claims):
+        return True
+    return False
 
 
 def execute_search(
@@ -257,6 +420,34 @@ def search_and_answer(
         search_req,
         default_query_expansion_mode="adaptive" if QUERY_EXPANSION_ENABLED else "off",
     )
+    if _should_try_neural_query_retry(request, search_resp):
+        retry_req = search_req.model_copy(
+            update={
+                "reranking": True,
+                "reranking_method": "neural",
+            }
+        )
+        retry_resp = execute_search(
+            retry_req,
+            default_query_expansion_mode="adaptive" if QUERY_EXPANSION_ENABLED else "off",
+        )
+        if _should_accept_neural_retry(search_resp, retry_resp):
+            search_resp = retry_resp
+    if _should_try_crosslingual_retry(request, search_resp):
+        retry_query, _ = _build_crosslingual_retrieval_query(request.query)
+        if retry_query:
+            recovery_updates = {"query": retry_query}
+            if request.reranking is None and request.reranking_method is None:
+                recovery_updates["reranking"] = True
+                recovery_updates["reranking_method"] = "neural"
+            recovery_req = search_req.model_copy(update=recovery_updates)
+            recovery_resp = execute_search(
+                recovery_req,
+                default_query_expansion_mode="adaptive" if QUERY_EXPANSION_ENABLED else "off",
+            )
+            if _should_accept_neural_retry(search_resp, recovery_resp):
+                search_resp = recovery_resp
+
     expansion_requested = search_resp.query_expansion_requested
     expansion_decision_reason = search_resp.query_expansion_decision_reason
     expansion_applied = search_resp.query_expansion_applied
@@ -329,6 +520,17 @@ def search_and_answer(
 
         # ── Step 4: Verify grounding ─────────────────────────
         grounding_result = GroundingReport(**verify_grounding(answer, citations))
+        if _should_try_grounded_reanswer(request, retrieval_low_confidence, grounding_result):
+            strict_answer_text, strict_chunk_ids, _ = generate_answer(
+                query=request.query,
+                chunks=chunks_data,
+                system_prompt=STRICT_GROUNDED_SYSTEM_PROMPT,
+            )
+            strict_grounding = GroundingReport(**verify_grounding(strict_answer_text, citations))
+            if _should_accept_grounded_reanswer(grounding_result, strict_grounding):
+                answer = strict_answer_text
+                chunks_used = strict_chunk_ids
+                grounding_result = strict_grounding
         grounded = grounding_result.grounded
         citation_coverage = grounding_result.citation_coverage
         final_low_confidence, low_confidence_reason = _finalize_low_confidence(

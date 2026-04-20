@@ -81,6 +81,12 @@ export default function DashboardPage() {
   }, [days, refreshToken, workspaceId]);
 
   const corpus = health?.corpus;
+  const canonicalDocuments = corpus?.documents ?? 0;
+  const canonicalChunks = corpus?.chunks ?? 0;
+  const operationalDocuments = corpus?.operational_documents ?? 0;
+  const operationalChunks = corpus?.operational_chunks ?? 0;
+  const totalDocuments = canonicalDocuments + operationalDocuments;
+  const totalChunks = canonicalChunks + operationalChunks;
   const retrieval = metrics?.retrieval;
   const ingestion = metrics?.ingestion;
   const answer = metrics?.answer;
@@ -122,8 +128,8 @@ export default function DashboardPage() {
 
       <div className="grid cols-4">
         {[
-          { label: "Documentos", value: corpus?.documents, subtitle: "Corpus ativo" },
-          { label: "Chunks", value: corpus?.chunks, subtitle: "Indexação persistida" },
+          { label: "Documentos", value: corpus ? totalDocuments : undefined, subtitle: "Canônico + operacional" },
+          { label: "Chunks", value: corpus ? totalChunks : undefined, subtitle: "Persistidos no workspace" },
           { label: "Pontos Qdrant", value: health?.qdrant?.workspace_points, subtitle: "Workspace ativo" },
           { label: "Total queries", value: retrieval?.total_queries, subtitle: "Período selecionado" },
           { label: "Alertas ativos", value: alerts?.total_active ?? 0, subtitle: "Sinais operacionais" },
@@ -311,7 +317,9 @@ export default function DashboardPage() {
           <div className="list-item">
             <strong>Corpus</strong>
             <p className="thin">
-              {corpus ? `${corpus.parsed_documents} parsed / ${corpus.partial_documents} partial` : "—"}
+              {corpus
+                ? `${formatNumber(canonicalDocuments)} canônicos · ${formatNumber(operationalDocuments)} operacionais · ${formatNumber(corpus.parsed_documents)} parsed / ${formatNumber(corpus.partial_documents)} partial`
+                : "—"}
             </p>
           </div>
           <div className="list-item">
@@ -448,10 +456,10 @@ export default function DashboardPage() {
                     </p>
                   </div>
                   <div className="list-item">
-                    <strong>Corpus canônico</strong>
+                    <strong>Inventário do workspace</strong>
                     <p className="thin">
                       {corpus
-                        ? `${formatNumber(corpus.documents)} docs · ${formatNumber(corpus.chunks)} chunks · ${formatNumber(corpus.parsed_documents)} parsed · ${formatNumber(corpus.partial_documents)} partial`
+                        ? `${formatNumber(totalDocuments)} docs (${formatNumber(canonicalDocuments)} canônicos + ${formatNumber(operationalDocuments)} operacionais) · ${formatNumber(totalChunks)} chunks (${formatNumber(canonicalChunks)} + ${formatNumber(operationalChunks)}) · ${formatNumber(corpus.parsed_documents)} parsed · ${formatNumber(corpus.partial_documents)} partial`
                         : "—"}
                     </p>
                   </div>

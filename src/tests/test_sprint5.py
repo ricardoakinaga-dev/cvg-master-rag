@@ -252,6 +252,72 @@ class TestDatasetValidation:
         assert overview["documents"] == 1
         assert overview["chunks"] == 1
 
+    def test_list_document_items_and_metadata_include_operational_uploads(self, tmp_path, monkeypatch):
+        """Workspace inventory endpoints must expose both canonical and operational items."""
+        from services.document_registry import get_document_metadata, list_document_items
+
+        workspace_dir = tmp_path / "default"
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+
+        def write_doc(doc_id: str, filename: str, raw_json_path: str):
+            (workspace_dir / f"{doc_id}_raw.json").write_text(
+                json.dumps(
+                    {
+                        "document_id": doc_id,
+                        "source_type": "md",
+                        "filename": filename,
+                        "workspace_id": "default",
+                        "raw_json_path": raw_json_path,
+                        "pages": [{"page_number": 1, "text": f"Conteúdo {filename}"}],
+                        "metadata": {"page_count": 1, "ingestion_status": "parsed"},
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (workspace_dir / f"{doc_id}_chunks.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "chunk_id": f"chunk_{doc_id}_0000",
+                            "document_id": doc_id,
+                            "workspace_id": "default",
+                            "chunk_index": 0,
+                            "text": f"Chunk {filename}",
+                            "start_char": 0,
+                            "end_char": 20,
+                            "page_hint": 1,
+                            "strategy": "recursive",
+                            "chunk_size_chars": 20,
+                            "created_at": "2026-04-19T00:00:00Z",
+                        }
+                    ],
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+        write_doc("doc-canonical", "keep.md", "/tmp/keep_raw.json")
+        write_doc("doc-operational", "upload.md", "/tmp/uploads/upload_raw.json")
+
+        monkeypatch.setattr("services.document_registry.DOCUMENTS_DIR", tmp_path)
+        monkeypatch.setattr(
+            "services.document_registry.canonical_document_ids",
+            lambda workspace_id="default": {"doc-canonical"},
+        )
+
+        payload = list_document_items("default", limit=20, offset=0)
+        listed_ids = {item["document_id"] for item in payload["items"]}
+
+        assert listed_ids == {"doc-canonical", "doc-operational"}
+        by_id = {item["document_id"]: item for item in payload["items"]}
+        assert by_id["doc-canonical"]["catalog_scope"] == "canonical"
+        assert by_id["doc-operational"]["catalog_scope"] == "operational"
+
+        operational_meta = get_document_metadata("doc-operational", "default")
+        assert operational_meta is not None
+        assert operational_meta["catalog_scope"] == "operational"
+
 
 class TestEmbeddingBatching:
     """Embedding batch requests must stay below provider request limits."""
@@ -999,6 +1065,72 @@ class TestMultiDocumentSearch:
 
         assert low_conf.low_confidence
 
+    def test_search_hybrid_dedupes_repetitive_dense_hits(self, monkeypatch):
+        """Duplicate low-diversity dense hits must not crowd out more informative candidates."""
+        from types import SimpleNamespace
+        from services.vector_service import search_hybrid
+
+        repetitive_text = ("Prazo de reembolso de Pix: 2 dias uteis. " * 24).strip()
+        medical_text = (
+            "Levetiracetam has been used as a pulse treatment to reduce cluster seizures in dogs. "
+            "The suggested regime is a single 60 mg/kg oral dose immediately after a seizure, "
+            "followed by 20-30 mg/kg three times daily until there have been no seizures for 48 hours."
+        )
+
+        class _FakeClient:
+            def query_points(self, **kwargs):
+                using = kwargs.get("using")
+                if using == "dense":
+                    return SimpleNamespace(
+                        points=[
+                            SimpleNamespace(
+                                payload={
+                                    "chunk_id": "pix-1",
+                                    "document_id": "doc-pix",
+                                    "text": repetitive_text,
+                                    "page_hint": 1,
+                                },
+                                score=0.92,
+                            ),
+                            SimpleNamespace(
+                                payload={
+                                    "chunk_id": "pix-2",
+                                    "document_id": "doc-pix",
+                                    "text": repetitive_text,
+                                    "page_hint": 1,
+                                },
+                                score=0.91,
+                            ),
+                            SimpleNamespace(
+                                payload={
+                                    "chunk_id": "med-1",
+                                    "document_id": "doc-med",
+                                    "text": medical_text,
+                                    "page_hint": 163,
+                                },
+                                score=0.70,
+                            ),
+                        ]
+                    )
+                if using == "sparse":
+                    return SimpleNamespace(points=[])
+                raise AssertionError(f"Unexpected vector type: {using}")
+
+        monkeypatch.setattr("services.vector_service.get_client", lambda: _FakeClient())
+        monkeypatch.setattr("services.vector_service.ensure_collection", lambda *args, **kwargs: None)
+
+        resp = search_hybrid(SearchRequest(
+            query="qual o tratamento para convulsão em cão?",
+            workspace_id="default",
+            top_k=5,
+            threshold=0.0,
+        ))
+
+        assert resp.results
+        assert resp.results[0].document_id == "doc-med"
+        assert [item.chunk_id for item in resp.results].count("pix-1") + [item.chunk_id for item in resp.results].count("pix-2") == 1
+        assert len([item for item in resp.results if item.document_id == "doc-pix"]) == 1
+
 
 # ── Telemetry Ingestion ──────────────────────────────────────────────────
 
@@ -1236,13 +1368,15 @@ class TestHealthEndpoint:
 
         monkeypatch.setattr("api.main.get_client", lambda: FakeClient())
         monkeypatch.setattr(
-            "api.main.get_corpus_overview",
+            "api.main.get_workspace_inventory",
             lambda workspace_id="default": {
                 "workspace_id": workspace_id,
                 "documents": 1,
                 "chunks": 7,
                 "parsed_documents": 1,
                 "partial_documents": 0,
+                "operational_documents": 2,
+                "operational_chunks": 9,
             },
         )
         monkeypatch.setattr(
@@ -1270,6 +1404,8 @@ class TestHealthEndpoint:
         assert data["qdrant"]["workspace_points"] == 7
         assert data["corpus"]["documents"] == 1
         assert data["corpus"]["chunks"] == 7
+        assert data["corpus"]["operational_documents"] == 2
+        assert data["corpus"]["operational_chunks"] == 9
         assert data["telemetry"]["queries"]["count"] == 3
         assert data["telemetry"]["ingestion"]["errors"] == 1
         assert data["telemetry"]["evaluation"]["count"] == 1
@@ -2490,6 +2626,341 @@ class TestQueryPipeline:
         assert resp.retrieval["low_confidence_reason"] == "grounding_override"
         assert resp.grounding is not None
         assert resp.grounding.grounded is True
+
+    def test_query_pipeline_retries_with_neural_reranking_when_initial_retrieval_is_bad(self, monkeypatch):
+        """Query pipeline should retry with neural reranking when the first retrieval is low-confidence."""
+        from services.search_service import search_and_answer
+
+        calls = []
+
+        def fake_execute_search(request, default_query_expansion_mode="off"):
+            calls.append((request.reranking, request.reranking_method))
+            if request.reranking_method == "neural":
+                return SearchResponse(
+                    query=request.query,
+                    workspace_id=request.workspace_id,
+                    results=[
+                        SearchResultItem(
+                            chunk_id="chunk-medical-1",
+                            document_id="doc-medical",
+                            document_filename="neurology.pdf",
+                            text="Treatment of status epilepticus in dogs may require benzodiazepines such as diazepam or midazolam followed by anticonvulsants.",
+                            score=0.82,
+                            page_hint=352,
+                            source="dense+sparse_rrf+neural",
+                            workspace_id=request.workspace_id,
+                            source_type="pdf",
+                            tags=["medical"],
+                        )
+                    ],
+                    total_candidates=20,
+                    low_confidence=False,
+                    retrieval_time_ms=60,
+                    method="híbrida",
+                    scores_breakdown={"dense_max": 0.82, "sparse_max": 0.0},
+                    reranking_applied=True,
+                    reranking_method="neural",
+                    query_expansion_applied=False,
+                    query_expansion_method=None,
+                    query_expansion_fallback=False,
+                    query_expansion_requested=False,
+                    query_expansion_mode="off",
+                    query_expansion_decision_reason=None,
+                    retrieval_profile=None,
+                )
+
+            return SearchResponse(
+                query=request.query,
+                workspace_id=request.workspace_id,
+                results=[
+                    SearchResultItem(
+                        chunk_id="chunk-generic-1",
+                        document_id="doc-generic",
+                        document_filename="generic.md",
+                        text="Generic introductory context with little treatment information.",
+                        score=0.10,
+                        page_hint=1,
+                        source="dense+sparse_rrf",
+                        workspace_id=request.workspace_id,
+                        source_type="md",
+                        tags=[],
+                    )
+                ],
+                total_candidates=20,
+                low_confidence=True,
+                retrieval_time_ms=40,
+                method="híbrida",
+                scores_breakdown={"dense_max": 0.10, "sparse_max": 0.0},
+                reranking_applied=False,
+                reranking_method=None,
+                query_expansion_applied=False,
+                query_expansion_method=None,
+                query_expansion_fallback=False,
+                query_expansion_requested=False,
+                query_expansion_mode="off",
+                query_expansion_decision_reason=None,
+                retrieval_profile=None,
+            )
+
+        monkeypatch.setattr("services.search_service.execute_search", fake_execute_search)
+        monkeypatch.setattr(
+            "services.search_service.generate_answer",
+            lambda query, chunks: ("Usar benzodiazepínicos seguidos de anticonvulsivantes.", [chunks[0]["chunk_id"]], 12),
+        )
+        monkeypatch.setattr(
+            "services.search_service.verify_grounding",
+            lambda answer, citations: {
+                "grounded": True,
+                "citation_coverage": 1.0,
+                "uncited_claims": [],
+                "needs_review": False,
+                "reason": None,
+            },
+        )
+
+        resp = search_and_answer(QueryRequest(
+            query="qual o tratamento para convulsão em cão?",
+            workspace_id="default",
+            top_k=5,
+            threshold=0.7,
+        ))
+
+        assert calls == [(None, None), (True, "neural")]
+        assert "benzodiazep" in resp.answer.lower()
+        assert resp.chunks_used == ["chunk-medical-1"]
+        assert resp.retrieval["reranking_method"] == "neural"
+
+    def test_query_pipeline_retries_with_crosslingual_bridge_for_protocol_question(self, monkeypatch):
+        """Low-confidence clinical protocol questions should retry with English glossary hints."""
+        from services.search_service import search_and_answer
+
+        calls = []
+
+        def fake_execute_search(request, default_query_expansion_mode="off"):
+            calls.append((request.query, request.reranking, request.reranking_method))
+            if "status epilepticus" in request.query and "acute repetitive seizures" in request.query:
+                return SearchResponse(
+                    query=request.query,
+                    workspace_id=request.workspace_id,
+                    results=[
+                        SearchResultItem(
+                            chunk_id="chunk-medical-2",
+                            document_id="doc-medical",
+                            document_filename="neurology.pdf",
+                            text="Treatment of status epilepticus in dogs requires rapid anticonvulsant therapy.",
+                            score=0.84,
+                            page_hint=352,
+                            source="dense+sparse_rrf+neural",
+                            workspace_id=request.workspace_id,
+                            source_type="pdf",
+                            tags=["medical"],
+                        )
+                    ],
+                    total_candidates=25,
+                    low_confidence=False,
+                    retrieval_time_ms=75,
+                    method="híbrida",
+                    scores_breakdown={"dense_max": 0.84, "sparse_max": 0.22},
+                    reranking_applied=True,
+                    reranking_method="neural",
+                    query_expansion_applied=False,
+                    query_expansion_method=None,
+                    query_expansion_fallback=False,
+                    query_expansion_requested=False,
+                    query_expansion_mode="off",
+                    query_expansion_decision_reason=None,
+                    retrieval_profile=None,
+                )
+
+            return SearchResponse(
+                query=request.query,
+                workspace_id=request.workspace_id,
+                results=[
+                    SearchResultItem(
+                        chunk_id="chunk-generic-1",
+                        document_id="doc-generic",
+                        document_filename="generic.md",
+                        text="Generic introductory context with little treatment information.",
+                        score=0.11,
+                        page_hint=1,
+                        source="dense+sparse_rrf",
+                        workspace_id=request.workspace_id,
+                        source_type="md",
+                        tags=[],
+                    )
+                ],
+                total_candidates=20,
+                low_confidence=True,
+                retrieval_time_ms=40,
+                method="híbrida",
+                scores_breakdown={"dense_max": 0.11, "sparse_max": 0.0},
+                reranking_applied=bool(request.reranking),
+                reranking_method=request.reranking_method,
+                query_expansion_applied=False,
+                query_expansion_method=None,
+                query_expansion_fallback=False,
+                query_expansion_requested=False,
+                query_expansion_mode="off",
+                query_expansion_decision_reason=None,
+                retrieval_profile=None,
+            )
+
+        monkeypatch.setattr("services.search_service.execute_search", fake_execute_search)
+        monkeypatch.setattr(
+            "services.search_service.generate_answer",
+            lambda query, chunks: ("Usar terapia anticonvulsivante rápida no cão.", [chunks[0]["chunk_id"]], 14),
+        )
+        monkeypatch.setattr(
+            "services.search_service.verify_grounding",
+            lambda answer, citations: {
+                "grounded": True,
+                "citation_coverage": 1.0,
+                "uncited_claims": [],
+                "needs_review": False,
+                "reason": None,
+            },
+        )
+
+        resp = search_and_answer(QueryRequest(
+            query="me dê um protocolo para convulsão em cão",
+            workspace_id="default",
+            top_k=5,
+            threshold=0.7,
+        ))
+
+        assert calls[0] == ("me dê um protocolo para convulsão em cão", None, None)
+        assert calls[1] == ("me dê um protocolo para convulsão em cão", True, "neural")
+        assert "status epilepticus" in calls[2][0]
+        assert "acute repetitive seizures" in calls[2][0]
+        assert calls[2][1:] == (True, "neural")
+        assert resp.chunks_used == ["chunk-medical-2"]
+        assert "anticonvulsivante" in resp.answer.lower()
+
+    def test_query_pipeline_retries_with_stricter_grounded_prompt_when_protocol_answer_overreaches(self, monkeypatch):
+        """A clinically relevant but weakly grounded protocol answer should get one stricter extractive retry."""
+        from services.search_service import search_and_answer
+
+        monkeypatch.setattr("services.search_service.llm_client.api_key", "test-key")
+        monkeypatch.setattr(
+            "services.search_service.execute_search",
+            lambda request, default_query_expansion_mode="off": SearchResponse(
+                query=request.query,
+                workspace_id=request.workspace_id,
+                results=[
+                    SearchResultItem(
+                        chunk_id="chunk-medical-3",
+                        document_id="doc-medical",
+                        document_filename="neurology.pdf",
+                        text="If seizure persists, diazepam or midazolam may be administered, followed by anticonvulsants.",
+                        score=0.84,
+                        page_hint=352,
+                        source="dense+sparse_rrf+neural",
+                        workspace_id=request.workspace_id,
+                        source_type="pdf",
+                        tags=["medical"],
+                    )
+                ],
+                total_candidates=10,
+                low_confidence=False,
+                retrieval_time_ms=80,
+                method="híbrida",
+                reranking_applied=True,
+                reranking_method="neural",
+            ),
+        )
+
+        calls = []
+
+        def fake_generate_answer(query, chunks, model=None, system_prompt=None):
+            calls.append(system_prompt)
+            if system_prompt and "altamente extractiva" in system_prompt:
+                return ("Administrar diazepam ou midazolam se a convulsão persistir, seguido de anticonvulsivantes.", [chunks[0]["chunk_id"]], 11)
+            return ("O protocolo inclui estabilização ampla, avaliação geral e múltiplos passos adicionais.", [chunks[0]["chunk_id"]], 12)
+
+        def fake_verify_grounding(answer, citations):
+            if "diazepam ou midazolam" in answer:
+                return {
+                    "grounded": True,
+                    "citation_coverage": 1.0,
+                    "uncited_claims": [],
+                    "needs_review": False,
+                    "reason": None,
+                }
+            return {
+                "grounded": False,
+                "citation_coverage": 0.4,
+                "uncited_claims": ["passos adicionais"],
+                "needs_review": True,
+                "reason": "Citation coverage 40% < 80%",
+            }
+
+        monkeypatch.setattr("services.search_service.generate_answer", fake_generate_answer)
+        monkeypatch.setattr("services.search_service.verify_grounding", fake_verify_grounding)
+
+        resp = search_and_answer(QueryRequest(
+            query="me dê um protocolo para convulsão em cão",
+            workspace_id="default",
+            top_k=5,
+            threshold=0.7,
+        ))
+
+        assert calls[0] is None
+        assert calls[1] is not None and "altamente extractiva" in calls[1]
+        assert "diazepam ou midazolam" in resp.answer.lower()
+        assert resp.grounded is True
+        assert resp.citation_coverage == 1.0
+
+
+class TestGroundingMultilingual:
+    """Grounding should handle paraphrase/translation when lexical overlap is weak."""
+
+    def test_verify_grounding_accepts_semantic_multilingual_match(self, monkeypatch):
+        from services.grounding_service import verify_grounding
+        from models.schemas import Citation
+
+        monkeypatch.setattr(
+            "services.grounding_service._semantic_similarity",
+            lambda sentence, citation_text: 0.81,
+        )
+
+        result = verify_grounding(
+            "O tratamento inclui um bolus de 1 ml/kg de gluconato de cálcio a 10% por via intravenosa.",
+            [
+                Citation(
+                    chunk_id="chunk-med-1",
+                    document_id="doc-med",
+                    document_filename="neurology.pdf",
+                    page=358,
+                    text="Correction: A bolus of 1 ml/kg 10% calcium gluconate solution should be administered by intravenous injection over 20 minutes.",
+                    score=0.88,
+                )
+            ],
+        )
+
+        assert result["grounded"] is True
+        assert result["citation_coverage"] == 1.0
+        assert result["uncited_claims"] == []
+
+    def test_verify_grounding_accepts_cognate_overlap_across_languages(self):
+        from services.grounding_service import verify_grounding
+        from models.schemas import Citation
+
+        result = verify_grounding(
+            "O tratamento pode incluir medicamentos anticonvulsivantes.",
+            [
+                Citation(
+                    chunk_id="chunk-med-2",
+                    document_id="doc-med",
+                    document_filename="neurology.pdf",
+                    page=352,
+                    text="Administration of anticonvulsant medications may be required for emergency seizure treatment.",
+                    score=0.84,
+                )
+            ],
+        )
+
+        assert result["grounded"] is True
+        assert result["citation_coverage"] == 1.0
 
 
 # ── Enterprise Session Contracts ────────────────────────────────────────────
@@ -7085,6 +7556,14 @@ class TestQueryExpansion:
         should_expand, reason = _should_expand_adaptive("Qual o status do protocolo 12345?")
         assert should_expand is False
         assert reason == "specific_lookup"
+
+    def test_adaptive_expands_generic_protocol_question(self):
+        """Natural-language protocol requests must not be mistaken for ID lookups."""
+        from services.search_service import _should_expand_adaptive
+
+        should_expand, reason = _should_expand_adaptive("Me dê um protocolo para convulsão em cão")
+        assert should_expand is True
+        assert reason == "general_query"
 
     def test_adaptive_skips_specific_lookup_uppercase_code(self):
         """Adaptive mode skips expansion for uppercase code patterns like PROJ123."""

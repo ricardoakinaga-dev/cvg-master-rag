@@ -363,7 +363,7 @@ def health_check(
     """Health check endpoint."""
     target_workspace = _resolve_workspace_scope(workspace_id, session)
     with traced_span("health.check", kind=SpanKind.INTERNAL, workspace_id=target_workspace) as span:
-        corpus = get_corpus_overview(target_workspace or "default")
+        corpus = get_workspace_inventory(target_workspace or "default")
         telemetry = get_telemetry()
         qdrant_ok = False
         qdrant_points = None

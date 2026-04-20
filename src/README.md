@@ -297,8 +297,8 @@ curl -X POST "http://localhost:8000/evaluation/dataset?workspace_id=default" \
 | `QDRANT_HOST` | localhost | Host do Qdrant |
 | `QDRANT_PORT` | 6333 | Porta do Qdrant |
 | `QDRANT_COLLECTION` | rag_phase0 | Nome da collection |
-| `CHUNK_SIZE` | 1000 | Tamanho do chunk |
-| `CHUNK_OVERLAP` | 200 | Overlap entre chunks |
+| `CHUNK_SIZE` | 1200 | Tamanho do chunk |
+| `CHUNK_OVERLAP` | 240 | Overlap entre chunks |
 | `DEFAULT_TOP_K` | 5 | Número de resultados |
 | `DEFAULT_THRESHOLD` | 0.70 | Threshold mínimo de score |
 | `LLM_MODEL` | gpt-4o-mini | Modelo para respostas |

@@ -14,6 +14,8 @@ export type HealthResponse = {
     chunks: number;
     parsed_documents: number;
     partial_documents: number;
+    operational_documents: number;
+    operational_chunks: number;
   };
   telemetry?: {
     period_days: number;

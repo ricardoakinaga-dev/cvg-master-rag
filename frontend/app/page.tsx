@@ -4,7 +4,7 @@ import type { Route } from "next";
 import Link from "next/link";
 import { ArrowRight, BookOpenText, Search, MessageSquareText, LayoutDashboard, ShieldAlert } from "lucide-react";
 import { useEnterpriseSession } from "@/components/layout/enterprise-session-provider";
-import { Card, Badge, ExternalLink } from "@/components/ui";
+import { Card } from "@/components/ui";
 import { PageHeader } from "@/components/layout/page-header";
 import { ROUTE_META, type AppRoute } from "@/lib/navigation";
 
@@ -34,49 +34,6 @@ export default function HomePage() {
         title={ROUTE_META["/"].title}
         description={ROUTE_META["/"].description}
       />
-
-      <div className="grid cols-2">
-        <Card className="card-inner">
-          <div className="card-header">
-            <div className="card-title">
-              <strong>Ponto de entrada operacional</strong>
-              <span>Rotas reais e backend integrado.</span>
-            </div>
-            <Badge variant="info">App Router</Badge>
-          </div>
-          <p className="thin">
-            Esta interface foi desenhada para operar o corpus canônico, o retrieval híbrido, as consultas auditáveis e os
-            indicadores do sistema sem depender de mocks visuais.
-          </p>
-          <div className="page-actions">
-            <Link href="/documents" className="ui-button primary">
-              Abrir documentos <ArrowRight size={16} />
-            </Link>
-            <ExternalLink href="http://localhost:8000/health" className="ui-button secondary">
-              Ver health
-            </ExternalLink>
-          </div>
-        </Card>
-
-        <Card className="card-inner">
-          <div className="card-header">
-            <div className="card-title">
-              <strong>Arquitetura da UI</strong>
-              <span>Shell global + páginas funcionais.</span>
-            </div>
-          </div>
-          <div className="list">
-            <div className="list-item">
-              <strong>Sidebar e header</strong>
-              <p className="thin">Navegação ativa e estado do corpus visíveis em toda a aplicação.</p>
-            </div>
-            <div className="list-item">
-              <strong>Componentes base</strong>
-              <p className="thin">Button, Input, Select, Tabs, Table, Modal, Drawer, Toast, Skeleton e estados vazios.</p>
-            </div>
-          </div>
-        </Card>
-      </div>
 
       <div className="grid cols-3">
         {modulesWithRole.map((module) => {

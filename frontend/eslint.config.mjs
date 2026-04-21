@@ -17,6 +17,8 @@ export default [
     ],
   },
   js.configs.recommended,
+  nextPlugin.flatConfig.recommended,
+  nextPlugin.flatConfig.coreWebVitals,
   {
     files: ["**/*.{ts,tsx}"],
     languageOptions: {
@@ -27,12 +29,10 @@ export default [
       },
     },
     plugins: {
-      "@next/next": nextPlugin,
       "@typescript-eslint": tsPlugin,
       "react-hooks": reactHooks,
     },
     rules: {
-      ...(nextPlugin.configs?.recommended?.rules ?? {}),
       "no-unused-vars": "off",
       "no-undef": "off",
       "@typescript-eslint/no-unused-vars": ["warn", { argsIgnorePattern: "^_" }],

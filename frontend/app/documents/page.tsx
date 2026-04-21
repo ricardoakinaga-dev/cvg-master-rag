@@ -336,7 +336,7 @@ export default function DocumentsPage() {
         </Card>
       ) : null}
 
-      {!loading && !error && (data?.items.length ?? 0) === 0 ? (
+      {!loading && !error && (data?.items?.length ?? 0) === 0 ? (
         <EmptyState
           title="Nenhum documento encontrado"
           description="A listagem está vazia para os filtros atuais."
@@ -365,7 +365,7 @@ export default function DocumentsPage() {
                     </td>
                   </tr>
                 ))
-              : data?.items.map((item) => (
+              : data?.items?.map((item) => (
                   <tr key={item.document_id} onClick={() => setSelected(item)} style={{ cursor: "pointer" }}>
                     <td>
                       <strong>{item.filename}</strong>
@@ -453,7 +453,7 @@ export default function DocumentsPage() {
                 </div>
                 <div className="list-item">
                   <strong>Tags</strong>
-                  <p className="thin">{selectedDetail.tags.length ? selectedDetail.tags.join(", ") : "—"}</p>
+                  <p className="thin">{selectedDetail.tags?.length ? selectedDetail.tags.join(", ") : "—"}</p>
                 </div>
                 <div className="list-item">
                   <strong>Metadata</strong>

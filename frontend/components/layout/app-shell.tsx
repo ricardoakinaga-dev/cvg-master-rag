@@ -7,7 +7,7 @@ import { ActivitySquare, BookOpenText, Building2, LayoutDashboard, LogOut, Messa
 import { EnterpriseSessionProvider, useEnterpriseSession } from "@/components/layout/enterprise-session-provider";
 import { Badge, Button, Card, Drawer, Select, ToastProvider, ToastViewport } from "@/components/ui";
 import { api } from "@/lib/api";
-import { formatDateTime, formatNumber } from "@/lib/utils";
+import { formatDateTime } from "@/lib/utils";
 import { getAllowedNavItems, getBreadcrumbs, isRouteAllowed, ROUTE_META, type AppRoute } from "@/lib/navigation";
 
 const ICONS: Record<string, ComponentType<{ size?: number }>> = {
@@ -96,13 +96,6 @@ function AppShellFrame({ children }: { children: ReactNode }) {
   const activeWorkspaceLabel = session?.active_tenant.workspace_id ?? "carregando";
   const availableTenants = session?.available_tenants ?? [];
   const navItems = getAllowedNavItems(session.user.role);
-  const canonicalDocuments = health?.corpus?.documents ?? 0;
-  const canonicalChunks = health?.corpus?.chunks ?? 0;
-  const operationalDocuments = health?.corpus?.operational_documents ?? 0;
-  const operationalChunks = health?.corpus?.operational_chunks ?? 0;
-  const totalDocuments = canonicalDocuments + operationalDocuments;
-  const totalChunks = canonicalChunks + operationalChunks;
-
   return (
     <div className="app-shell">
         <aside className="sidebar">
@@ -138,18 +131,6 @@ function AppShellFrame({ children }: { children: ReactNode }) {
               <span>{process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000"}</span>
             </div>
             <p className="thin">Frontend configurado para consumir o backend local por REST.</p>
-          </Card>
-
-          <Card className="card-inner">
-            <div className="card-title">
-              <strong>Estado do corpus</strong>
-              <span>{health?.corpus ? `${formatNumber(totalDocuments)} documentos` : "carregando"}</span>
-            </div>
-            <p className="thin">
-              {health?.corpus
-                ? `${formatNumber(totalChunks)} chunks · ${formatNumber(canonicalDocuments)} canônicos · ${formatNumber(operationalDocuments)} operacionais`
-                : "Aguardando resposta do healthcheck"}
-            </p>
           </Card>
 
           <Card className="card-inner session-card">
@@ -251,19 +232,6 @@ function AppShellFrame({ children }: { children: ReactNode }) {
               <div className="state-box">
                 <h3>Healthcheck indisponível</h3>
                 <p>{error}</p>
-              </div>
-            ) : null}
-            {health?.corpus ? (
-              <div className="state-box">
-                <h3>Corpus ativo</h3>
-                <p>
-                  {formatNumber(totalDocuments)} documentos · {formatNumber(totalChunks)} chunks ·
-                  Qdrant {health.qdrant?.workspace_points ?? "?"} pontos do workspace
-                </p>
-                <p className="thin">
-                  Canônico {formatNumber(canonicalDocuments)} / Operacional {formatNumber(operationalDocuments)} · Parsed {formatNumber(health.corpus.parsed_documents)} · partial {formatNumber(health.corpus.partial_documents)} · coleção{" "}
-                  {health.qdrant?.collection ?? "?"}
-                </p>
               </div>
             ) : null}
             {children}

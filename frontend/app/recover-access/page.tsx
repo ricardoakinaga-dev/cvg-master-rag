@@ -12,14 +12,13 @@ function RecoveryContent() {
   const { pushToast } = useToast();
   const { session, requestRecovery } = useEnterpriseSession();
   const tenants = session?.available_tenants ?? [];
-  const [email, setEmail] = useState(session?.user.email ?? "viewer@demo.local");
+  const [email, setEmail] = useState("");
   const [tenantId, setTenantId] = useState(session?.active_tenant.tenant_id ?? "default");
   const [reason, setReason] = useState("Sessão expirada ou acesso negado");
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     if (!session) return;
-    setEmail(session.user.email || "viewer@demo.local");
     setTenantId(session.active_tenant.tenant_id);
   }, [session]);
 
@@ -70,7 +69,14 @@ function RecoveryContent() {
 
             <label className="ui-label">
               E-mail
-              <Input value={email} onChange={(event) => setEmail(event.target.value)} />
+              <Input
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                placeholder="seu-email@dominio"
+                autoComplete="off"
+                autoCapitalize="none"
+                spellCheck={false}
+              />
             </label>
             <label className="ui-label">
               Tenant

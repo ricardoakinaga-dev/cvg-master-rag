@@ -4,31 +4,31 @@
 
 ## CONTEXTO
 - project: cvg-master-rag
-- current_engine: BUILD_INCREMENTAL
-- completion_status: ✅ QUERY CLÍNICA DE "PROTOCOLO" RESPONDE COM GROUNDING E CITAÇÕES
+- current_engine: AUDIT
+- completion_status: ✅ AUDITORIA DE RUNTIME E SUÍTES COMPLETAS EXECUTADAS COM FECHAMENTO DOS GAPS CRÍTICOS
 
 ## POSIÇÃO ATUAL
-- current_phase: LOCAL_RUNTIME — CLINICAL QUERY ANSWERING HARDENED
-- current_task: `/query` combina retry crosslingual em baixa confiança com um segundo passe extractivo estrito quando a primeira resposta clínica ainda extrapola as citações
+- current_phase: AUDIT_RUNTIME — FULL STACK VALIDATION CLOSED
+- current_task: consolidar o fechamento dos gaps residuais de qualidade e manter o runtime persistente validado ponta a ponta
 
 ## STATUS
-- status: IN_PROGRESS
+- status: READY_FOR_NEXT_STEP
 - maturity: 96%
 - score_target: 96/100
 
 ## PROGRESSO
-- last_completed_action: `search_service` passou a fazer um segundo passe extractivo estrito quando a busca clínica está boa, mas a primeira resposta ainda fica pouco ancorada; após o retry crosslingual e o reanswer estrito, a query real `me dê um protocolo para convulsão em cão` retornou `grounded=true`, `citation_coverage=1.0`, `low_confidence=false` e `needs_review=false`
-- next_action: consolidar/publicar o conjunto local de correções de retrieval + grounding quando desejado e monitorar se outras formulações clínicas precisam do mesmo padrão de reanswer estrito
+- last_completed_action: fechados os gaps residuais da rodada de auditoria; `frontend/eslint.config.mjs` migrou para o preset flat oficial do Next e o warning de plugin no `next build` desapareceu, `pytest.ini` suprimiu de forma precisa a depreciação externa de `httpx`, e o helper de login do smoke passou a esperar o cookie `HttpOnly` real do backend para eliminar flake de sessão; revalidação final confirmou `pytest = 237 passed / 2 skipped` sem warnings, `pnpm lint` limpo, `pnpm build` ok, `pnpm exec tsc --noEmit` ok e `pnpm test:smoke = 7 passed`
+- next_action: gerar commit e push da rodada completa de hardening/auditoria ou consolidar o relatório formal em `/docs/04_audit/0490_audit_report.md`
 
 ## BLOQUEIOS
 - blockers: none
 
 ## DECISÃO HUMANA
 - human_decision_required: no
-- decision_description: O reanswer estrito entra apenas quando o retrieval já está saudável e a primeira resposta ainda extrapola o contexto; isso melhora grounding sem mudar a semântica do contrato de retrieval nem forçar custo extra em queries já boas
+- decision_description: os testes automatizados alteraram estado real do corpus e do admin store durante a auditoria; ao final, o ambiente persistente foi restaurado para o conjunto operacional controlado (`default=5 docs`, `northwind=1 doc`, `acme-lab upload operacional`) e o índice vetorial foi reindexado para eliminar drift
 
 ## TIMESTAMP
-- last_update: 2026-04-20T03:45:00-03:00
+- last_update: 2026-04-21T04:12:00Z
 
 ---
 
@@ -65,6 +65,16 @@ O agente DEVE:
 | 2026-04-20 | BUILD_INCREMENTAL | COMPLETED | NONE | Grounding multilíngue endurecido com unidades menores, similaridade semântica e cognatos | COMPLETED |
 | 2026-04-20 | BUILD_INCREMENTAL | COMPLETED | NONE | Recovery crosslingual adicionado ao `/query` para formulações clínicas com `protocolo` em português | COMPLETED |
 | 2026-04-20 | BUILD_INCREMENTAL | COMPLETED | NONE | Reanswer extractivo estrito adicionado para elevar grounding em respostas clínicas | COMPLETED |
+| 2026-04-21 | REPOSITORY_GOVERNANCE | COMPLETED | NONE | Restauração novamente do working tree a partir de `origin/main` | READY_FOR_NEXT_STEP |
+| 2026-04-21 | LOCAL_RUNTIME | COMPLETED | NONE | Domínio local `www.master.rag.centroveterinarioguarapiranga.com` apontado para localhost com frontend e backend válidos | READY_FOR_NEXT_STEP |
+| 2026-04-21 | LOCAL_RUNTIME | COMPLETED | NONE | Login demo, rotas protegidas e troca de tenant validados no domínio HTTPS local | READY_FOR_NEXT_STEP |
+| 2026-04-21 | LOCAL_RUNTIME | COMPLETED | NONE | Backend e frontend persistidos em `systemd` com boot automático | READY_FOR_NEXT_STEP |
+| 2026-04-21 | LOCAL_RUNTIME | COMPLETED | NONE | Tela de login endurecida contra exposição de credenciais e persistência de sessão no browser | READY_FOR_NEXT_STEP |
+| 2026-04-21 | LOCAL_RUNTIME | COMPLETED | NONE | UI pós-login simplificada e rota `/search` corrigida no proxy do domínio | READY_FOR_NEXT_STEP |
+| 2026-04-21 | LOCAL_RUNTIME | COMPLETED | NONE | Sessão segura migrada para cookie `HttpOnly` com login persistente após refresh | READY_FOR_NEXT_STEP |
+| 2026-04-21 | LOCAL_RUNTIME | COMPLETED | NONE | Rota `/documents` corrigida no proxy e cliente endurecido contra resposta não JSON | READY_FOR_NEXT_STEP |
+| 2026-04-21 | AUDIT | COMPLETED | NONE | Bateria completa de validação executada e gaps críticos de runtime/frontend/backend corrigidos | READY_FOR_NEXT_STEP |
+| 2026-04-21 | AUDIT | COMPLETED | NONE | Gaps residuais de `eslint/next`, warnings do `pytest` e flake de sessão no smoke eliminados com revalidação completa | READY_FOR_NEXT_STEP |
 
 ---
 

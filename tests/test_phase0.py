@@ -19,8 +19,8 @@ def test_imports():
         RRF_K, DEFAULT_TOP_K, DEFAULT_THRESHOLD,
         SUPPORTED_EXTENSIONS
     )
-    assert CHUNK_SIZE == 1000
-    assert CHUNK_OVERLAP == 200
+    assert CHUNK_SIZE == 1200
+    assert CHUNK_OVERLAP == 240
     assert RRF_K == 60
     assert ".pdf" in SUPPORTED_EXTENSIONS
     assert ".docx" in SUPPORTED_EXTENSIONS

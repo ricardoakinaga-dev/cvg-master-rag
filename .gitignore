@@ -14,6 +14,7 @@ __pycache__/
 # Virtual environments
 venv/
 .venv/
+src/.venv/
 src/venv/
 src/venv-py312-incomplete-20260419/
 

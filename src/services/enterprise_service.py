@@ -29,6 +29,8 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
     "viewer": ["read", "tenant:switch"],
 }
 
+SESSION_COOKIE_NAME = "cvg_master_rag_session"
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 

@@ -8,7 +8,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query, Depends, Header, Request
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query, Depends, Header, Request, Response, Cookie
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
@@ -58,6 +58,7 @@ from services.enterprise_service import (
     list_tenants,
     logout as logout_enterprise_session,
     queue_recovery,
+    SESSION_COOKIE_NAME,
     switch_tenant as switch_enterprise_tenant,
 )
 from core.config import SUPPORTED_EXTENSIONS, DOCUMENTS_DIR, DATA_DIR, QDRANT_COLLECTION
@@ -91,9 +92,19 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+DEFAULT_CORS_ORIGINS = [
+    "http://127.0.0.1:3005",
+    "http://127.0.0.1:3015",
+    "http://localhost:3005",
+    "http://localhost:3015",
+    "https://www.master.rag.centroveterinarioguarapiranga.com",
+]
+raw_cors_origins = os.getenv("CORS_ALLOWED_ORIGINS", "")
+allowed_cors_origins = [origin.strip() for origin in raw_cors_origins.split(",") if origin.strip()] or DEFAULT_CORS_ORIGINS
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -101,6 +112,36 @@ app.add_middleware(
 
 
 ROLE_ORDER = {"viewer": 0, "operator": 1, "admin": 2}
+SESSION_COOKIE_MAX_AGE = 60 * 60 * 8
+SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "true").lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_session_token(authorization: str | None, session_cookie: str | None) -> str | None:
+    return extract_session_token(authorization) or session_cookie
+
+
+def _set_session_cookie(response: Response, session_token: str | None) -> None:
+    if not session_token:
+        return
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=session_token,
+        max_age=SESSION_COOKIE_MAX_AGE,
+        httponly=True,
+        secure=SESSION_COOKIE_SECURE,
+        samesite="lax",
+        path="/",
+    )
+
+
+def _clear_session_cookie(response: Response) -> None:
+    response.delete_cookie(
+        key=SESSION_COOKIE_NAME,
+        httponly=True,
+        secure=SESSION_COOKIE_SECURE,
+        samesite="lax",
+        path="/",
+    )
 
 
 @app.middleware("http")
@@ -141,9 +182,10 @@ async def request_context_middleware(request: Request, call_next):
 
 def _enterprise_session_from_authorization(
     authorization: str | None = Header(default=None, alias="Authorization"),
+    session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
 ) -> EnterpriseSession:
     """Resolve the enterprise session from the bearer token emitted by the backend."""
-    return EnterpriseSession(**get_enterprise_session(extract_session_token(authorization)))
+    return EnterpriseSession(**get_enterprise_session(_resolve_session_token(authorization, session_cookie)))
 
 
 def _coerce_session(session: object) -> EnterpriseSession:
@@ -435,7 +477,7 @@ def get_tenants():
 
 
 @app.post("/auth/login", response_model=EnterpriseSession)
-def login(request: LoginRequest):
+def login(request: LoginRequest, response: Response = None):
     """Create a server-side enterprise session for the requested identity."""
     with traced_span(
         "auth.login",
@@ -445,6 +487,8 @@ def login(request: LoginRequest):
     ):
         try:
             session = login_enterprise_user(email=request.email, password=request.password, tenant_id=request.tenant_id)
+            if response is not None:
+                _set_session_cookie(response, session.get("session_token"))
             log_admin_event(
                 actor_user_id=session["user"]["user_id"],
                 actor_email=session["user"]["email"],
@@ -483,16 +527,23 @@ def login(request: LoginRequest):
 
 
 @app.post("/auth/logout", response_model=LogoutResponse)
-def logout(authorization: str | None = Header(default=None, alias="Authorization")):
+def logout(
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    response: Response = None,
+    session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+):
     """Invalidate the current server-side enterprise session."""
-    current = get_enterprise_session(extract_session_token(authorization))
+    session_token = _resolve_session_token(authorization, session_cookie)
+    current = get_enterprise_session(session_token)
     with traced_span(
         "auth.logout",
         kind=SpanKind.INTERNAL,
-        attributes={"session_token": extract_session_token(authorization) or ""},
+        attributes={"session_token": session_token or ""},
         workspace_id=current.get("active_tenant", {}).get("workspace_id"),
     ):
-        logout_enterprise_session(extract_session_token(authorization))
+        logout_enterprise_session(session_token)
+        if response is not None:
+            _clear_session_cookie(response)
         if current.get("authenticated"):
             log_admin_event(
                 actor_user_id=current["user"]["user_id"],
@@ -511,6 +562,7 @@ def logout(authorization: str | None = Header(default=None, alias="Authorization
 def auth_switch_tenant(
     request: TenantSwitchRequest,
     authorization: str | None = Header(default=None, alias="Authorization"),
+    session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
     _session: EnterpriseSession = Depends(_enterprise_session_from_authorization),
 ):
     """Switch the active tenant inside the current server-side session."""
@@ -522,7 +574,7 @@ def auth_switch_tenant(
         workspace_id=request.tenant_id,
     ):
         try:
-            switched = switch_enterprise_tenant(extract_session_token(authorization), request.tenant_id)
+            switched = switch_enterprise_tenant(_resolve_session_token(authorization, session_cookie), request.tenant_id)
             log_admin_event(
                 actor_user_id=_session.user.user_id,
                 actor_email=_session.user.email,

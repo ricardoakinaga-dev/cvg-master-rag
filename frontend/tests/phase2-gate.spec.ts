@@ -16,6 +16,7 @@ const EMAILS = {
   operator: "operator@demo.local",
   viewer: "viewer@demo.local",
 } as const;
+const BACKEND_ORIGIN = "http://127.0.0.1:8010";
 
 async function loginAs(
   page: Page,
@@ -23,7 +24,7 @@ async function loginAs(
   tenantId = "default",
 ) {
   await page.goto("/login");
-  await expect(page.getByRole("heading", { name: /Entre com identidade/i })).toBeVisible();
+  await expect(page.getByText("Entrar no console")).toBeVisible();
   await page.getByLabel("Perfil").selectOption(role);
   await page.getByLabel("E-mail").fill(EMAILS[role]);
   await page.getByLabel("Tenant").selectOption(tenantId);
@@ -31,9 +32,23 @@ async function loginAs(
   await page.getByRole("button", { name: "Entrar", exact: true }).click();
   await expect(page).toHaveURL(/\/$/);
   await expect(page.getByRole("heading", { name: "Início" })).toBeVisible();
+  await expect
+    .poll(async () => {
+      const cookies = await page.context().cookies(BACKEND_ORIGIN);
+      return cookies.some((cookie) => cookie.name === "cvg_master_rag_session") ? "active" : "pending";
+    })
+    .toBe("active");
 }
 
 test.describe("Fase 2 gate smoke", () => {
+  test("login não expõe credenciais por padrão", async ({ page }) => {
+    await page.goto("/login");
+    await expect(page.getByLabel("E-mail")).toHaveValue("");
+    await expect(page.getByLabel("Senha")).toHaveValue("");
+    await expect(page.getByText(/Credencial demo padrão/i)).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /Entrar como/i })).toHaveCount(0);
+  });
+
   test("rotas principais renderizam no desktop", async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await loginAs(page, "admin");

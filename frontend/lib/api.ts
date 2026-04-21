@@ -36,7 +36,6 @@ import {
   SearchFilters,
   SearchResponse,
 } from "@/types";
-import { loadStoredJson } from "@/lib/storage";
 
 export class ApiError extends Error {
   status: number;
@@ -51,31 +50,21 @@ export class ApiError extends Error {
 }
 
 const DEFAULT_API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
-const SESSION_STORAGE_KEY = "frontend.enterprise.session";
-
-function getEnterpriseHeaders(): Record<string, string> {
-  if (typeof window === "undefined") return {};
-  const session = loadStoredJson<EnterpriseSession | null>(SESSION_STORAGE_KEY, null);
-  if (!session?.authenticated || !session.session_token) return {};
-  return {
-    Authorization: `Bearer ${session.session_token}`,
-  };
-}
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${DEFAULT_API_BASE}${path}`, {
     ...init,
     headers: {
-      ...getEnterpriseHeaders(),
+      Accept: "application/json",
       ...(init?.headers || {}),
     },
     cache: "no-store",
+    credentials: "include",
   });
 
   const contentType = response.headers.get("content-type") || "";
-  const payload = contentType.includes("application/json")
-    ? await response.json()
-    : await response.text();
+  const isJsonResponse = contentType.includes("application/json");
+  const payload = isJsonResponse ? await response.json() : await response.text();
 
   if (!response.ok) {
     const message =
@@ -85,6 +74,10 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
           ? payload
           : response.statusText;
     throw new ApiError(message || "Request failed", response.status, payload);
+  }
+
+  if (!isJsonResponse) {
+    throw new ApiError("Unexpected non-JSON response", response.status, payload);
   }
 
   return payload as T;

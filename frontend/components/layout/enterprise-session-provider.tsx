@@ -2,10 +2,7 @@
 
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "@/lib/api";
-import { loadStoredJson, saveStoredJson } from "@/lib/storage";
 import type { EnterpriseSession, LoginRequest, RecoveryRequest } from "@/types";
-
-const SESSION_STORAGE_KEY = "frontend.enterprise.session";
 
 const ANONYMOUS_USER: EnterpriseSession["user"] = {
   user_id: "anonymous",
@@ -104,12 +101,6 @@ export function EnterpriseSessionProvider({ children }: { children: ReactNode })
 
   useEffect(() => {
     let active = true;
-    const stored = loadStoredJson<EnterpriseSession | null>(SESSION_STORAGE_KEY, null);
-    if (stored) {
-      setSession(normalizeSession(stored));
-      setReady(true);
-    }
-
     const requestId = bootstrapRequestRef.current + 1;
     bootstrapRequestRef.current = requestId;
 
@@ -117,7 +108,8 @@ export function EnterpriseSessionProvider({ children }: { children: ReactNode })
       .current()
       .then((response) => {
         if (!active || bootstrapRequestRef.current !== requestId) return;
-        setSession(normalizeSession(response));
+        const normalized = normalizeSession(response);
+        setSession(normalized);
       })
       .catch(() => {
         if (!active || bootstrapRequestRef.current !== requestId) return;
@@ -132,11 +124,6 @@ export function EnterpriseSessionProvider({ children }: { children: ReactNode })
     };
   }, []);
 
-  useEffect(() => {
-    if (!ready || !session) return;
-    saveStoredJson(SESSION_STORAGE_KEY, session);
-  }, [ready, session]);
-
   const value = useMemo<EnterpriseSessionContextValue>(() => {
     return {
       session,
@@ -146,7 +133,6 @@ export function EnterpriseSessionProvider({ children }: { children: ReactNode })
         const response = await api.session.login(request);
         const normalized = normalizeSession(response);
         setSession(normalized);
-        saveStoredJson(SESSION_STORAGE_KEY, normalized);
         return normalized;
       },
       signOut: async () => {
@@ -157,9 +143,7 @@ export function EnterpriseSessionProvider({ children }: { children: ReactNode })
           // Best effort only.
         }
         setSession((current) => {
-          const next = asAnonymousSession(current);
-          saveStoredJson(SESSION_STORAGE_KEY, next);
-          return next;
+          return asAnonymousSession(current);
         });
       },
       switchTenant: async (tenantId: string) => {
@@ -167,7 +151,6 @@ export function EnterpriseSessionProvider({ children }: { children: ReactNode })
         const response = await api.session.switchTenant(tenantId);
         const normalized = normalizeSession(response);
         setSession(normalized);
-        saveStoredJson(SESSION_STORAGE_KEY, normalized);
       },
       requestRecovery: async (request: RecoveryRequest) => {
         const response = await api.session.recovery(request);
@@ -178,7 +161,6 @@ export function EnterpriseSessionProvider({ children }: { children: ReactNode })
         const response = await api.session.current();
         const normalized = normalizeSession(response);
         setSession(normalized);
-        saveStoredJson(SESSION_STORAGE_KEY, normalized);
       },
     };
   }, [ready, session]);

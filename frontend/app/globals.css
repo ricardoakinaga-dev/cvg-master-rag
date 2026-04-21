@@ -772,7 +772,8 @@ select {
 
 .auth-shell-single {
   grid-template-columns: minmax(0, 1fr);
-  width: min(1080px, 100%);
+  width: min(520px, 100%);
+  justify-items: center;
 }
 
 .auth-hero,
@@ -787,6 +788,8 @@ select {
 
 .auth-panel {
   align-self: start;
+  width: 100%;
+  max-width: 520px;
 }
 
 .auth-cta {

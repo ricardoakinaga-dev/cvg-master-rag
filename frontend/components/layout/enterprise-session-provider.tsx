@@ -2,7 +2,15 @@
 
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "@/lib/api";
-import type { EnterpriseSession, LoginRequest, RecoveryRequest } from "@/types";
+import type {
+  EnterpriseSession,
+  LoginRequest,
+  PasswordChangeRequest,
+  PasswordResetConfirmRequest,
+  RecoveryRequest,
+  SessionRevokeRequest,
+  UserSessionRecord,
+} from "@/types";
 
 const ANONYMOUS_USER: EnterpriseSession["user"] = {
   user_id: "anonymous",
@@ -53,34 +61,6 @@ function isExpired(expiresAt?: string | null) {
   return Number.isFinite(parsed) && parsed <= Date.now();
 }
 
-function normalizeSession(source: EnterpriseSession | null): EnterpriseSession {
-  if (!source) {
-    return asAnonymousSession(null);
-  }
-
-  if (source.session_state === "expired" || isExpired(source.expires_at)) {
-    return {
-      ...asAnonymousSession(source),
-      session_state: "expired",
-      message: "Sessão expirada. Faça login novamente para continuar.",
-    };
-  }
-
-  return source;
-}
-
-type EnterpriseSessionContextValue = {
-  session: EnterpriseSession | null;
-  ready: boolean;
-  signIn: (request: LoginRequest) => Promise<EnterpriseSession>;
-  signOut: () => Promise<void>;
-  switchTenant: (tenantId: string) => Promise<void>;
-  requestRecovery: (request: RecoveryRequest) => Promise<string>;
-  refresh: () => Promise<void>;
-};
-
-const EnterpriseSessionContext = createContext<EnterpriseSessionContextValue | null>(null);
-
 function asAnonymousSession(source: EnterpriseSession | null): EnterpriseSession {
   return {
     authenticated: false,
@@ -93,6 +73,34 @@ function asAnonymousSession(source: EnterpriseSession | null): EnterpriseSession
     message: "Sessão expirada. Faça login para continuar.",
   };
 }
+
+function normalizeSession(source: EnterpriseSession | null): EnterpriseSession {
+  if (!source) return asAnonymousSession(null);
+  if (source.session_state === "expired" || isExpired(source.expires_at)) {
+    return {
+      ...asAnonymousSession(source),
+      session_state: "expired",
+      message: "Sessão expirada. Faça login novamente para continuar.",
+    };
+  }
+  return source;
+}
+
+type EnterpriseSessionContextValue = {
+  session: EnterpriseSession | null;
+  ready: boolean;
+  signIn: (request: LoginRequest) => Promise<EnterpriseSession>;
+  signOut: () => Promise<void>;
+  switchTenant: (tenantId: string) => Promise<void>;
+  requestRecovery: (request: RecoveryRequest) => Promise<string>;
+  confirmPasswordReset: (request: PasswordResetConfirmRequest) => Promise<string>;
+  changePassword: (request: PasswordChangeRequest) => Promise<string>;
+  listSessions: () => Promise<UserSessionRecord[]>;
+  revokeSessions: (request: SessionRevokeRequest) => Promise<string>;
+  refresh: () => Promise<void>;
+};
+
+const EnterpriseSessionContext = createContext<EnterpriseSessionContextValue | null>(null);
 
 export function EnterpriseSessionProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<EnterpriseSession | null>(null);
@@ -108,8 +116,7 @@ export function EnterpriseSessionProvider({ children }: { children: ReactNode })
       .current()
       .then((response) => {
         if (!active || bootstrapRequestRef.current !== requestId) return;
-        const normalized = normalizeSession(response);
-        setSession(normalized);
+        setSession(normalizeSession(response));
       })
       .catch(() => {
         if (!active || bootstrapRequestRef.current !== requestId) return;
@@ -142,25 +149,38 @@ export function EnterpriseSessionProvider({ children }: { children: ReactNode })
         } catch {
           // Best effort only.
         }
-        setSession((current) => {
-          return asAnonymousSession(current);
-        });
+        setSession((current) => asAnonymousSession(current));
       },
       switchTenant: async (tenantId: string) => {
         bootstrapRequestRef.current += 1;
         const response = await api.session.switchTenant(tenantId);
-        const normalized = normalizeSession(response);
-        setSession(normalized);
+        setSession(normalizeSession(response));
       },
       requestRecovery: async (request: RecoveryRequest) => {
-        const response = await api.session.recovery(request);
+        const response = await api.session.requestPasswordReset({ email: request.email, tenant_id: request.tenant_id });
+        return response.message;
+      },
+      confirmPasswordReset: async (request: PasswordResetConfirmRequest) => {
+        const response = await api.session.confirmPasswordReset(request);
+        return response.message;
+      },
+      changePassword: async (request: PasswordChangeRequest) => {
+        const response = await api.session.changePassword(request);
+        setSession((current) => asAnonymousSession(current));
+        return response.message;
+      },
+      listSessions: async () => {
+        const response = await api.session.sessions();
+        return response.items;
+      },
+      revokeSessions: async (request: SessionRevokeRequest) => {
+        const response = await api.session.revokeSessions(request);
         return response.message;
       },
       refresh: async () => {
         bootstrapRequestRef.current += 1;
         const response = await api.session.current();
-        const normalized = normalizeSession(response);
-        setSession(normalized);
+        setSession(normalizeSession(response));
       },
     };
   }, [ready, session]);

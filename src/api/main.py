@@ -34,6 +34,8 @@ from models.schemas import (
     ObservabilityTraceResponse,
     RepairLogListResponse,
     LoginRequest, LogoutResponse, RecoveryRequest, RecoveryResponse,
+    PasswordChangeRequest, PasswordResetRequestPayload, PasswordResetConfirmRequest, PasswordResetAdminRequest,
+    UserSessionListResponse, SessionRevokeRequest, SessionRevokeResponse,
     TenantSwitchRequest,
 )
 from services.admin_service import (
@@ -46,31 +48,59 @@ from services.admin_service import (
     list_admin_events,
     log_admin_event,
     list_users,
+    user_has_permission,
     reset_admin_state,
     update_tenant,
     update_user,
 )
 from services.enterprise_service import (
+    admin_issue_password_reset,
+    SESSION_COOKIE_NAME,
     bootstrap_session,
+    confirm_password_reset,
     extract_session_token,
     get_session as get_enterprise_session,
+    list_sessions_for_user,
     login as login_enterprise_user,
     list_tenants,
     logout as logout_enterprise_session,
     queue_recovery,
-    SESSION_COOKIE_NAME,
+    request_password_reset,
+    revoke_session as revoke_enterprise_session,
+    revoke_user_sessions,
     switch_tenant as switch_enterprise_tenant,
 )
-from core.config import SUPPORTED_EXTENSIONS, DOCUMENTS_DIR, DATA_DIR, QDRANT_COLLECTION
+from core.config import (
+    SUPPORTED_EXTENSIONS,
+    DOCUMENTS_DIR,
+    DATA_DIR,
+    QDRANT_COLLECTION,
+    CORS_ALLOWED_ORIGINS,
+    CORS_ALLOW_CREDENTIALS,
+)
 from services.telemetry_service import get_telemetry
 from services.request_context import clear_request_id, set_request_id
 from services.vector_service import get_client
 from services.document_registry import get_corpus_overview, get_workspace_inventory, list_document_items
+from services.api_security import (
+    enterprise_session_from_authorization,
+    coerce_session,
+    require_authenticated_session,
+    require_min_role,
+    audit_access_denied,
+    session_has_permission,
+    require_permission,
+    require_admin,
+    require_operator,
+    require_workspace_access,
+    resolve_workspace_scope,
+)
 from qdrant_client.models import FieldCondition, Filter, MatchValue
 from services.integrity_service import summarize_workspace_index_drift
 from services.operational_retention_service import summarize_operational_retention
 from telemetry.slo import SLI_DEFINITIONS, get_all_slos, get_slo_status
 from telemetry.tracing import SpanKind, SpanStatus, list_recent_spans, record_exception, start_span, traced_span
+from api.observability_routes import router as observability_router, _build_slo_snapshot
 
 
 @asynccontextmanager
@@ -91,6 +121,7 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+app.include_router(observability_router)
 
 DEFAULT_CORS_ORIGINS = [
     "http://127.0.0.1:3005",
@@ -105,13 +136,13 @@ allowed_cors_origins = [origin.strip() for origin in raw_cors_origins.split(",")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_cors_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=CORS_ALLOW_CREDENTIALS,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
 )
 
 
-ROLE_ORDER = {"viewer": 0, "operator": 1, "admin": 2}
+ROLE_ORDER = {"viewer": 0, "operator": 1, "auditor": 2, "admin_rag": 3, "super_admin": 4, "admin": 4}
 SESSION_COOKIE_MAX_AGE = 60 * 60 * 8
 SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "true").lower() in {"1", "true", "yes", "on"}
 
@@ -184,69 +215,88 @@ def _enterprise_session_from_authorization(
     authorization: str | None = Header(default=None, alias="Authorization"),
     session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
 ) -> EnterpriseSession:
-    """Resolve the enterprise session from the bearer token emitted by the backend."""
     return EnterpriseSession(**get_enterprise_session(_resolve_session_token(authorization, session_cookie)))
 
 
 def _coerce_session(session: object) -> EnterpriseSession:
-    """Allow direct function calls in tests to fall back to the bootstrap session."""
-    if isinstance(session, EnterpriseSession):
-        return session
-    return EnterpriseSession(**bootstrap_session())
+    return coerce_session(session)
 
 
 def _require_authenticated_session(session: EnterpriseSession) -> EnterpriseSession:
-    session = _coerce_session(session)
-    if not session.authenticated or session.session_state != "active":
-        raise HTTPException(status_code=401, detail={"error": "unauthorized", "message": "Active session required"})
-    return session
+    return require_authenticated_session(session)
 
 
 def _require_min_role(session: EnterpriseSession, role: str) -> EnterpriseSession:
-    session = _require_authenticated_session(session)
-    if ROLE_ORDER.get(session.user.role, 0) < ROLE_ORDER.get(role, 0):
-        raise HTTPException(status_code=403, detail={"error": "forbidden", "message": f"{role} role required"})
-    return session
+    return require_min_role(session, role)
+
+
+def _audit_access_denied(
+    session: EnterpriseSession,
+    *,
+    reason: str,
+    required_permission: str | None = None,
+    target_type: str = "route",
+    target_id: str = "unknown",
+    workspace_id: str | None = None,
+) -> None:
+    return audit_access_denied(
+        session,
+        reason=reason,
+        required_permission=required_permission,
+        target_type=target_type,
+        target_id=target_id,
+        workspace_id=workspace_id,
+    )
+
+
+def _session_has_permission(session: EnterpriseSession, permission: str) -> bool:
+    return session_has_permission(session, permission)
+
+
+def _require_permission(
+    session: EnterpriseSession,
+    permission: str,
+    *,
+    workspace_id: str | None = None,
+    target_type: str = "permission",
+    target_id: str | None = None,
+) -> EnterpriseSession:
+    return require_permission(
+        session,
+        permission,
+        workspace_id=workspace_id,
+        target_type=target_type,
+        target_id=target_id,
+    )
 
 
 def _require_admin(session: EnterpriseSession = Depends(_enterprise_session_from_authorization)) -> EnterpriseSession:
-    return _require_min_role(session, "admin")
+    return require_admin(session)
 
 
 def _require_operator(session: EnterpriseSession = Depends(_enterprise_session_from_authorization)) -> EnterpriseSession:
-    return _require_min_role(session, "operator")
+    return require_operator(session)
 
 
 def _require_workspace_access(
     workspace_id: str,
     session: EnterpriseSession = Depends(_enterprise_session_from_authorization),
 ) -> EnterpriseSession:
-    session = _require_authenticated_session(_coerce_session(session))
-    if session.active_tenant.workspace_id != workspace_id:
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "error": "workspace_forbidden",
-                "message": f"Workspace '{workspace_id}' is not active for tenant '{session.active_tenant.tenant_id}'",
-            },
-        )
-    return session
+    return require_workspace_access(workspace_id, session)
 
 
-def _resolve_workspace_scope(workspace_id: str | None, session: object, required_role: str | None = None) -> str | None:
-    """Resolve tenant-scoped access while keeping direct function tests usable."""
-    if not isinstance(workspace_id, str):
-        workspace_id = None
-    coerced = _coerce_session(session)
-    if isinstance(session, EnterpriseSession):
-        if not coerced.authenticated or coerced.session_state != "active":
-            return workspace_id or "default"
-        if required_role:
-            _require_min_role(coerced, required_role)
-        target_workspace = workspace_id or coerced.active_tenant.workspace_id
-        _require_workspace_access(target_workspace, coerced)
-        return target_workspace
-    return workspace_id or "default"
+def _resolve_workspace_scope(
+    workspace_id: str | None,
+    session: object,
+    required_role: str | None = None,
+    required_permission: str | None = None,
+) -> str | None:
+    return resolve_workspace_scope(
+        workspace_id,
+        session,
+        required_role=required_role,
+        required_permission=required_permission,
+    )
 
 
 def _compute_readiness_summary(
@@ -477,7 +527,7 @@ def get_tenants():
 
 
 @app.post("/auth/login", response_model=EnterpriseSession)
-def login(request: LoginRequest, response: Response = None):
+def login(request: LoginRequest, response: Response, raw_request: Request):
     """Create a server-side enterprise session for the requested identity."""
     with traced_span(
         "auth.login",
@@ -486,9 +536,14 @@ def login(request: LoginRequest, response: Response = None):
         workspace_id=request.tenant_id,
     ):
         try:
-            session = login_enterprise_user(email=request.email, password=request.password, tenant_id=request.tenant_id)
-            if response is not None:
-                _set_session_cookie(response, session.get("session_token"))
+            session = login_enterprise_user(
+                email=request.email,
+                password=request.password,
+                tenant_id=request.tenant_id,
+                ip=raw_request.client.host if raw_request and raw_request.client else None,
+                user_agent=raw_request.headers.get("user-agent") if raw_request else None,
+            )
+            _set_session_cookie(response, session.get("session_token"))
             log_admin_event(
                 actor_user_id=session["user"]["user_id"],
                 actor_email=session["user"]["email"],
@@ -500,7 +555,7 @@ def login(request: LoginRequest, response: Response = None):
                 metadata={"workspace_id": session["active_tenant"]["workspace_id"], "result": "success"},
             )
             return session
-        except ValueError:
+        except ValueError as exc:
             log_admin_event(
                 actor_user_id="anonymous",
                 actor_email=request.email,
@@ -509,7 +564,7 @@ def login(request: LoginRequest, response: Response = None):
                 target_type="user",
                 target_id=request.email,
                 tenant_id=request.tenant_id,
-                metadata={"workspace_id": request.tenant_id, "result": "invalid_credentials"},
+                metadata={"workspace_id": request.tenant_id, "result": str(exc)},
             )
             raise HTTPException(status_code=401, detail={"error": "invalid_credentials", "message": "Invalid credentials"})
         except PermissionError as exc:
@@ -602,9 +657,139 @@ def recovery(request: RecoveryRequest):
         return queue_recovery(request.email, request.tenant_id, request.reason)
 
 
+@app.post("/auth/request-password-reset", response_model=RecoveryResponse)
+def auth_request_password_reset(request: PasswordResetRequestPayload):
+    """Queue a password reset request with a neutral response."""
+    result = request_password_reset(request.email, request.tenant_id)
+    log_admin_event(
+        actor_user_id="anonymous",
+        actor_email=request.email.strip().lower(),
+        actor_role="anonymous",
+        action="auth.password_reset_requested",
+        target_type="user",
+        target_id=request.email.strip().lower(),
+        tenant_id=request.tenant_id,
+        metadata={"workspace_id": request.tenant_id},
+    )
+    return result
+
+
+@app.post("/auth/confirm-password-reset", response_model=RecoveryResponse)
+def auth_confirm_password_reset(request: PasswordResetConfirmRequest):
+    """Confirm a password reset using a one-time token."""
+    try:
+        result = confirm_password_reset(request.token, request.new_password)
+        log_admin_event(
+            actor_user_id=result["user_id"],
+            actor_email="",
+            actor_role="anonymous",
+            action="auth.password_reset_confirmed",
+            target_type="user",
+            target_id=result["user_id"],
+        )
+        return {"status": "queued", "message": result["message"]}
+    except ValueError:
+        log_admin_event(
+            actor_user_id="anonymous",
+            actor_email="",
+            actor_role="anonymous",
+            action="auth.password_reset_invalid_token",
+            target_type="reset_token",
+            target_id="invalid",
+        )
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "invalid_or_expired_reset_token", "message": "Reset token inválido ou expirado"},
+        )
+
+
+@app.post("/auth/change-password", response_model=RecoveryResponse)
+def auth_change_password(
+    request: PasswordChangeRequest,
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+    _session: EnterpriseSession = Depends(_enterprise_session_from_authorization),
+):
+    """Change the password for the authenticated user and revoke existing sessions."""
+    session = _require_authenticated_session(_session)
+    from services.enterprise_service import change_password as change_enterprise_password
+
+    try:
+        change_enterprise_password(
+            user_id=session.user.user_id,
+            current_password=request.current_password,
+            new_password=request.new_password,
+        )
+        revoked = revoke_user_sessions(session.user.user_id, reason="password_change")
+        revoke_enterprise_session(_resolve_session_token(authorization, session_cookie) or "", reason="password_change")
+        log_admin_event(
+            actor_user_id=session.user.user_id,
+            actor_email=session.user.email,
+            actor_role=session.user.role,
+            action="auth.change_password",
+            target_type="user",
+            target_id=session.user.user_id,
+            tenant_id=session.active_tenant.tenant_id,
+            metadata={"workspace_id": session.active_tenant.workspace_id, "revoked_sessions": revoked},
+        )
+        return {"status": "queued", "message": "Senha alterada. Faça login novamente."}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc), "message": str(exc)})
+
+
+@app.get("/auth/sessions", response_model=UserSessionListResponse)
+def auth_list_sessions(
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+    _session: EnterpriseSession = Depends(_enterprise_session_from_authorization),
+):
+    """List sessions for the authenticated user."""
+    session = _require_authenticated_session(_session)
+    items = list_sessions_for_user(
+        session.user.user_id,
+        current_session_token=_resolve_session_token(authorization, session_cookie),
+    )
+    return {"items": items, "total": len(items)}
+
+
+@app.post("/auth/sessions/revoke", response_model=SessionRevokeResponse)
+def auth_revoke_sessions(
+    request: SessionRevokeRequest,
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+    _session: EnterpriseSession = Depends(_enterprise_session_from_authorization),
+):
+    """Revoke one or more sessions for the current user or, with permission, for a target user."""
+    session = _require_authenticated_session(_session)
+    current_token = _resolve_session_token(authorization, session_cookie)
+    target_user_id = request.user_id or session.user.user_id
+    acting_on_other_user = target_user_id != session.user.user_id
+    if acting_on_other_user:
+        _require_permission(session, "sessions.revoke", workspace_id=session.active_tenant.workspace_id)
+    reason = (request.reason or "manual_revoke").strip() or "manual_revoke"
+    if request.revoke_all:
+        revoked = revoke_user_sessions(target_user_id, reason=reason, exclude_session_token=None if acting_on_other_user else current_token)
+    elif request.session_token:
+        revoked = revoke_enterprise_session(request.session_token, reason=reason)
+    else:
+        revoked = revoke_enterprise_session(current_token or "", reason=reason)
+    log_admin_event(
+        actor_user_id=session.user.user_id,
+        actor_email=session.user.email,
+        actor_role=session.user.role,
+        action="auth.session_revoked",
+        target_type="user" if request.revoke_all or request.user_id else "session",
+        target_id=target_user_id if request.revoke_all or request.user_id else (request.session_token or current_token or "unknown"),
+        tenant_id=session.active_tenant.tenant_id,
+        metadata={"workspace_id": session.active_tenant.workspace_id, "reason": reason, "revoked": revoked},
+    )
+    return {"revoked": revoked, "message": f"{revoked} sessão(ões) revogada(s)."}
+
+
 @app.get("/admin/tenants", response_model=list[EnterpriseTenant])
-def admin_list_tenants(_session: EnterpriseSession = Depends(_require_admin)):
+def admin_list_tenants(_session: EnterpriseSession = Depends(_enterprise_session_from_authorization)):
     """List tenants for admin workflows."""
+    _session = _require_permission(_session, "runtime.manage", workspace_id=_session.active_tenant.workspace_id)
     return list_admin_tenants()
 
 
@@ -782,6 +967,44 @@ def admin_delete_user(user_id: str, _session: EnterpriseSession = Depends(_requi
     return {"status": "deleted", "user_id": user_id}
 
 
+@app.post("/admin/users/{user_id}/reset-password")
+def admin_reset_user_password(
+    user_id: str,
+    request: PasswordResetAdminRequest,
+    _session: EnterpriseSession = Depends(_require_admin),
+):
+    """Issue a manual password reset token for a target user."""
+    try:
+        issued = admin_issue_password_reset(
+            user_id,
+            requested_by=_session.user.user_id,
+            expires_in_minutes=request.expires_in_minutes,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail={"error": "user_not_found", "user_id": user_id})
+    log_admin_event(
+        actor_user_id=_session.user.user_id,
+        actor_email=_session.user.email,
+        actor_role=_session.user.role,
+        action="user.password_reset_admin",
+        target_type="user",
+        target_id=user_id,
+        tenant_id=_session.active_tenant.tenant_id,
+        metadata={
+            "workspace_id": _session.active_tenant.workspace_id,
+            "reset_id": issued["reset_id"],
+            "expires_at": issued["expires_at"],
+            "reason": request.reason,
+        },
+    )
+    return {
+        "status": "issued",
+        "reset_id": issued["reset_id"],
+        "reset_token": issued["token"],
+        "expires_at": issued["expires_at"],
+    }
+
+
 @app.get("/admin/events", response_model=AdminEventListResponse)
 def admin_get_events(
     limit: int = Query(default=50, ge=1, le=500),
@@ -797,9 +1020,10 @@ def admin_get_events(
 
 @app.get("/admin/runtime", response_model=AdminRuntimeResponse)
 def admin_get_runtime(
-    _session: EnterpriseSession = Depends(_require_admin),
+    _session: EnterpriseSession = Depends(_enterprise_session_from_authorization),
 ):
     """Return a consolidated operational view for every tenant/workspace."""
+    _session = _require_permission(_session, "runtime.manage", workspace_id=_session.active_tenant.workspace_id)
     telemetry = get_telemetry()
     tenants = list_admin_tenants()
 
@@ -902,9 +1126,10 @@ def admin_get_runtime(
 @app.post("/admin/runtime/prune-index", response_model=AdminQdrantPruneResponse)
 def admin_prune_workspace_index(
     workspace_id: str = Query(default="default"),
-    _session: EnterpriseSession = Depends(_require_admin),
+    _session: EnterpriseSession = Depends(_enterprise_session_from_authorization),
 ):
     """Delete non-canonical Qdrant points for a workspace."""
+    _session = _require_permission(_session, "runtime.manage", workspace_id=workspace_id)
     from services.integrity_service import prune_workspace_index_to_registry
 
     try:
@@ -934,9 +1159,10 @@ def admin_prune_workspace_index(
 @app.post("/admin/runtime/cleanup-operational", response_model=AdminOperationalCleanupResponse)
 def admin_cleanup_operational_uploads(
     workspace_id: str = Query(default="default"),
-    _session: EnterpriseSession = Depends(_require_admin),
+    _session: EnterpriseSession = Depends(_enterprise_session_from_authorization),
 ):
     """Delete operational uploads that are older than the tenant TTL."""
+    _session = _require_permission(_session, "runtime.manage", workspace_id=workspace_id)
     from services.operational_retention_service import cleanup_operational_uploads
 
     try:
@@ -1028,6 +1254,7 @@ def admin_list_observability_audits(
     _session: EnterpriseSession = Depends(_require_admin),
 ):
     """List recent corpus audits for any workspace to admins."""
+    _session = _require_permission(_session, "audit.read", workspace_id=workspace_id or _session.active_tenant.workspace_id)
     try:
         tel = get_telemetry()
         return tel.list_audit_events(
@@ -1049,6 +1276,7 @@ def admin_list_observability_repairs(
     _session: EnterpriseSession = Depends(_require_admin),
 ):
     """List recent corpus repairs for any workspace to admins."""
+    _session = _require_permission(_session, "audit.read", workspace_id=workspace_id or _session.active_tenant.workspace_id)
     try:
         tel = get_telemetry()
         return tel.list_repair_events(
@@ -1068,9 +1296,10 @@ def admin_run_evaluation(
     reranking: bool = Query(default=False),
     reranking_method: str | None = Query(default=None, description="Override reranking method: 'bm25f' or 'neural'"),
     query_expansion: bool = Query(default=False, description="Enable HyDE-like query expansion"),
-    _session: EnterpriseSession = Depends(_require_admin),
+    _session: EnterpriseSession = Depends(_enterprise_session_from_authorization),
 ):
     """Allow admins to run evaluation for any workspace without switching active tenant."""
+    _session = _require_permission(_session, "runtime.manage", workspace_id=workspace_id)
     from services.evaluation_service import EvaluationService
 
     dataset_path = DATA_DIR / workspace_id / "dataset.json"
@@ -1123,9 +1352,10 @@ def admin_run_evaluation(
 def admin_run_corpus_audit(
     workspace_id: str = Query(default="default"),
     check_embeddings: bool = Query(default=False, description="If true, validates dense vectors in Qdrant"),
-    _session: EnterpriseSession = Depends(_require_admin),
+    _session: EnterpriseSession = Depends(_enterprise_session_from_authorization),
 ):
     """Allow admins to run a corpus integrity audit for any workspace."""
+    _session = _require_permission(_session, "corpus.audit", workspace_id=workspace_id)
     from services.integrity_service import audit_corpus_integrity
 
     with traced_span(
@@ -1176,9 +1406,10 @@ def admin_run_corpus_audit(
 def admin_repair_corpus_document(
     document_id: str,
     workspace_id: str = Query(default="default"),
-    _session: EnterpriseSession = Depends(_require_admin),
+    _session: EnterpriseSession = Depends(_enterprise_session_from_authorization),
 ):
     """Allow admins to repair a corpus document in any workspace."""
+    _session = _require_permission(_session, "corpus.repair", workspace_id=workspace_id)
     from services.integrity_service import repair_document
 
     with traced_span("corpus.repair.admin", kind=SpanKind.INTERNAL, workspace_id=workspace_id):
@@ -1233,9 +1464,10 @@ def admin_repair_corpus_batch(
     workspace_id: str = Query(default="default"),
     limit: int = Query(default=20, ge=1, le=200),
     check_embeddings: bool = Query(default=False, description="If true, validates vectors before selecting documents to repair"),
-    _session: EnterpriseSession = Depends(_require_admin),
+    _session: EnterpriseSession = Depends(_enterprise_session_from_authorization),
 ):
     """Repair every non-ok document found by a fresh corpus audit, up to the provided limit."""
+    _session = _require_permission(_session, "corpus.repair", workspace_id=workspace_id)
     from services.integrity_service import audit_corpus_integrity, repair_document
 
     try:
@@ -1328,6 +1560,7 @@ async def upload_document(
     chunking_strategy: 'recursive' (default, paragraph-aware) or 'semantic' (sentence-based with embedding coherence).
     """
     from services.ingestion_service import VALID_CHUNKING_STRATEGIES
+    _require_permission(_session, "documents.upload", workspace_id=workspace_id, target_type="workspace", target_id=workspace_id)
     if chunking_strategy not in VALID_CHUNKING_STRATEGIES:
         raise HTTPException(
             status_code=400,
@@ -1449,6 +1682,7 @@ def get_document(
     """
     from services.document_registry import get_document_metadata
 
+    _require_permission(_session, "documents.read", workspace_id=workspace_id, target_type="workspace", target_id=workspace_id)
     _require_workspace_access(workspace_id, _session)
     metadata = get_document_metadata(document_id, workspace_id)
     if not metadata:
@@ -1471,6 +1705,7 @@ def get_documents(
     _session: EnterpriseSession = Depends(_enterprise_session_from_authorization),
 ):
     """List canonical documents for the workspace."""
+    _require_permission(_session, "documents.read", workspace_id=workspace_id, target_type="workspace", target_id=workspace_id)
     _require_workspace_access(workspace_id, _session)
     return list_document_items(
         workspace_id=workspace_id,
@@ -1490,6 +1725,7 @@ def search(request: SearchRequest, _session: EnterpriseSession = Depends(_enterp
     """
     Hybrid search (dense + sparse + RRF) in knowledge base.
     """
+    _require_permission(_session, "search.execute", workspace_id=request.workspace_id, target_type="workspace", target_id=request.workspace_id)
     _require_workspace_access(request.workspace_id, _session)
     with traced_span(
         "search.execute",
@@ -1515,6 +1751,7 @@ def query(request: QueryRequest, _session: EnterpriseSession = Depends(_enterpri
     """
     from services.search_service import search_and_answer
 
+    _require_permission(_session, "query.execute", workspace_id=request.workspace_id, target_type="workspace", target_id=request.workspace_id)
     _require_workspace_access(request.workspace_id, _session)
     with traced_span(
         "query.execute",
@@ -1540,11 +1777,12 @@ def query(request: QueryRequest, _session: EnterpriseSession = Depends(_enterpri
 @app.get("/evaluation/dataset")
 def get_dataset(
     workspace_id: str = Query(default="default"),
-    _session: EnterpriseSession = Depends(_require_operator),
+    _session: EnterpriseSession = Depends(_enterprise_session_from_authorization),
 ):
     """
     Get the evaluation dataset for the workspace.
     """
+    _require_permission(_session, "observability.read", workspace_id=workspace_id, target_type="workspace", target_id=workspace_id)
     _require_workspace_access(workspace_id, _session)
     dataset_path = DATA_DIR / workspace_id / "dataset.json"
 
@@ -1581,9 +1819,10 @@ def get_query_logs(
     low_confidence: bool | None = Query(default=None),
     grounded: bool | None = Query(default=None),
     min_citation_coverage: float | None = Query(default=None, ge=0.0, le=1.0),
-    _session: EnterpriseSession = Depends(_require_operator),
+    _session: EnterpriseSession = Depends(_enterprise_session_from_authorization),
 ):
     """Return recent query logs for audit and QA workflows."""
+    _require_permission(_session, "audit.read", workspace_id=workspace_id, target_type="workspace", target_id=workspace_id)
     _require_workspace_access(workspace_id, _session)
     telemetry = get_telemetry()
     return telemetry.list_queries(
@@ -1601,9 +1840,10 @@ def get_query_logs(
 def upload_dataset(
     dataset: Dataset,
     workspace_id: str = Query(default="default"),
-    _session: EnterpriseSession = Depends(_require_operator),
+    _session: EnterpriseSession = Depends(_enterprise_session_from_authorization),
 ):
     """Upload or replace evaluation dataset."""
+    _require_permission(_session, "ingestion.run", workspace_id=workspace_id, target_type="workspace", target_id=workspace_id)
     _require_workspace_access(workspace_id, _session)
     dataset_dir = DATA_DIR / workspace_id
     dataset_dir.mkdir(parents=True, exist_ok=True)
@@ -1621,7 +1861,7 @@ def upload_dataset(
 def get_metrics(
     days: int = Query(default=7, ge=1, le=90),
     workspace_id: str | None = Query(default=None),
-    _session: EnterpriseSession | object = Depends(_require_operator),
+    _session: EnterpriseSession | object = Depends(_enterprise_session_from_authorization),
 ):
     """
     Get aggregated metrics for the last N days.
@@ -1630,110 +1870,12 @@ def get_metrics(
     try:
         from services.telemetry_service import get_telemetry
         tel = get_telemetry()
-        target_workspace = _resolve_workspace_scope(workspace_id, _session, required_role="operator")
+        target_workspace = _resolve_workspace_scope(workspace_id, _session, required_permission="observability.read")
         return tel.get_metrics(days=days, workspace_id=target_workspace)
     except Exception as e:
         raise HTTPException(status_code=500, detail={"error": "metrics_error", "message": str(e)})
 
 
-@app.get("/observability/alerts", response_model=ObservabilityAlertsResponse)
-def get_observability_alerts(
-    days: int = Query(default=1, ge=1, le=30),
-    workspace_id: str | None = Query(default=None),
-    _session: EnterpriseSession | object = Depends(_require_operator),
-):
-    """Expose computed operational alerts for the current workspace."""
-    try:
-        tel = get_telemetry()
-        target_workspace = _resolve_workspace_scope(workspace_id, _session, required_role="operator")
-        return tel.get_alerts(days=days, workspace_id=target_workspace)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail={"error": "observability_alerts_error", "message": str(e)})
-
-
-@app.get("/observability/slo", response_model=ObservabilitySLOResponse)
-def get_observability_slo(
-    workspace_id: str | None = Query(default=None),
-    _session: EnterpriseSession | object = Depends(_require_operator),
-):
-    """Expose SLI/SLO status for the active workspace."""
-    try:
-        target_workspace = _resolve_workspace_scope(workspace_id, _session, required_role="operator")
-        tel = get_telemetry()
-        metrics = tel.get_metrics(days=7, workspace_id=target_workspace)
-        try:
-            client = get_client()
-            client.get_collections()
-            qdrant_ok = True
-        except Exception:
-            qdrant_ok = False
-        return _build_slo_snapshot(metrics, workspace_id=target_workspace, qdrant_ok=qdrant_ok)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail={"error": "observability_slo_error", "message": str(e)})
-
-
-@app.get("/observability/traces", response_model=ObservabilityTraceResponse)
-def get_observability_traces(
-    workspace_id: str | None = Query(default=None),
-    limit: int = Query(default=20, ge=1, le=100),
-    _session: EnterpriseSession | object = Depends(_require_operator),
-):
-    """Return recent traced operations for the active workspace."""
-    try:
-        target_workspace = _resolve_workspace_scope(workspace_id, _session, required_role="operator")
-        items = list_recent_spans(limit=limit, workspace_id=target_workspace)
-        return {
-            "items": items,
-            "total": len(items),
-            "workspace_id": target_workspace,
-            "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail={"error": "observability_traces_error", "message": str(e)})
-
-
-@app.get("/observability/audits", response_model=AuditLogListResponse)
-def list_observability_audits(
-    days: int = Query(default=30, ge=1, le=90),
-    limit: int = Query(default=20, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
-    workspace_id: str | None = Query(default=None),
-    _session: EnterpriseSession | object = Depends(_require_operator),
-):
-    """List recent corpus audit events for the active workspace."""
-    try:
-        tel = get_telemetry()
-        target_workspace = _resolve_workspace_scope(workspace_id, _session, required_role="operator")
-        return tel.list_audit_events(
-            workspace_id=target_workspace,
-            days=days,
-            limit=limit,
-            offset=offset,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail={"error": "observability_audits_error", "message": str(e)})
-
-
-@app.get("/observability/repairs", response_model=RepairLogListResponse)
-def list_observability_repairs(
-    days: int = Query(default=30, ge=1, le=90),
-    limit: int = Query(default=20, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
-    workspace_id: str | None = Query(default=None),
-    _session: EnterpriseSession | object = Depends(_require_operator),
-):
-    """List recent corpus repair events for the active workspace."""
-    try:
-        tel = get_telemetry()
-        target_workspace = _resolve_workspace_scope(workspace_id, _session, required_role="operator")
-        return tel.list_repair_events(
-            workspace_id=target_workspace,
-            days=days,
-            limit=limit,
-            offset=offset,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail={"error": "observability_repairs_error", "message": str(e)})
 
 
 @app.post("/evaluation/run")
@@ -1743,7 +1885,7 @@ def run_evaluation(
     reranking: bool = Query(default=False),
     reranking_method: str | None = Query(default=None, description="Override reranking method: 'bm25f' or 'neural'"),
     query_expansion: bool = Query(default=False, description="Enable HyDE-like query expansion"),
-    _session: EnterpriseSession = Depends(_require_operator),
+    _session: EnterpriseSession = Depends(_enterprise_session_from_authorization),
 ):
     """
     Run full evaluation on the dataset.
@@ -1751,6 +1893,7 @@ def run_evaluation(
     If reranking=true, enables reranking during retrieval (method from reranking_method or global config).
     If query_expansion=true, uses HyDE-like expansion before retrieval.
     """
+    _require_permission(_session, "observability.read", workspace_id=workspace_id, target_type="workspace", target_id=workspace_id)
     _require_workspace_access(workspace_id, _session)
     from services.evaluation_service import EvaluationService
 
@@ -1779,13 +1922,14 @@ def run_ab_evaluation(
     workspace_id: str = Query(default="default"),
     variant_method: str = Query(default="bm25f", description="Reranking method for variant: 'bm25f' or 'neural'"),
     query_expansion: bool = Query(default=False, description="Apply query expansion to variant"),
-    _session: EnterpriseSession = Depends(_require_operator),
+    _session: EnterpriseSession = Depends(_enterprise_session_from_authorization),
 ):
     """
     Run A/B comparison: baseline (no reranking) vs variant (with specified method).
     Returns structured comparison with deltas for HIT@K, latency, and score.
     variant_method: 'bm25f' or 'neural'
     """
+    _require_permission(_session, "observability.read", workspace_id=workspace_id, target_type="workspace", target_id=workspace_id)
     _require_workspace_access(workspace_id, _session)
     from services.evaluation_service import EvaluationService
 
@@ -1815,12 +1959,13 @@ def run_ab_evaluation(
 def run_query_expansion_ab_evaluation(
     workspace_id: str = Query(default="default"),
     run_judge: bool = Query(default=False),
-    _session: EnterpriseSession = Depends(_require_operator),
+    _session: EnterpriseSession = Depends(_enterprise_session_from_authorization),
 ):
     """
     Run A/B comparison: baseline (no query expansion) vs variant (with HyDE expansion).
     Returns structured comparison with deltas for HIT@K, latency, and score.
     """
+    _require_permission(_session, "observability.read", workspace_id=workspace_id, target_type="workspace", target_id=workspace_id)
     _require_workspace_access(workspace_id, _session)
     from services.evaluation_service import EvaluationService
 
@@ -1846,7 +1991,7 @@ def run_chunking_ab_evaluation(
     document_id: str = Query(..., description="Document ID to compare chunking strategies for"),
     workspace_id: str = Query(default="default"),
     run_judge: bool = Query(default=False),
-    _session: EnterpriseSession = Depends(_require_operator),
+    _session: EnterpriseSession = Depends(_enterprise_session_from_authorization),
 ):
     """
     Run A/B comparison between recursive and semantic chunking for a single document.
@@ -1862,6 +2007,7 @@ def run_chunking_ab_evaluation(
     - Requires a dataset.json in the workspace.
     - Semantic chunking fallback (offline) may produce different chunk_count.
     """
+    _require_permission(_session, "corpus.audit", workspace_id=workspace_id, target_type="workspace", target_id=workspace_id)
     _require_workspace_access(workspace_id, _session)
 
     from core.config import DOCUMENTS_DIR
@@ -1910,7 +2056,7 @@ def run_chunking_ab_evaluation(
 def get_corpus_audit(
     workspace_id: str = Query(default="default"),
     check_embeddings: bool = Query(default=False, description="If true, reads and validates embedding vectors from Qdrant (expensive for large corpora)"),
-    _session: EnterpriseSession | object = Depends(_require_operator),
+    _session: EnterpriseSession | object = Depends(_enterprise_session_from_authorization),
 ):
     """
     Run a full corpus integrity audit for a workspace.
@@ -1927,7 +2073,7 @@ def get_corpus_audit(
     """
     from services.integrity_service import audit_corpus_integrity
 
-    target_workspace = _resolve_workspace_scope(workspace_id, _session, required_role="operator")
+    target_workspace = _resolve_workspace_scope(workspace_id, _session, required_permission="corpus.audit")
     try:
         report = audit_corpus_integrity(
             workspace_id=target_workspace,
@@ -1955,7 +2101,7 @@ def get_corpus_audit(
 def repair_corpus_document(
     document_id: str,
     workspace_id: str = Query(default="default"),
-    _session: EnterpriseSession = Depends(_require_operator),
+    _session: EnterpriseSession = Depends(_enterprise_session_from_authorization),
 ):
     """
     Repair a single document by re-reading its chunks from disk and re-indexing in Qdrant.
@@ -1965,7 +2111,7 @@ def repair_corpus_document(
     """
     from services.integrity_service import repair_document
 
-    target_workspace = _resolve_workspace_scope(workspace_id, _session, required_role="operator")
+    target_workspace = _resolve_workspace_scope(workspace_id, _session, required_permission="corpus.repair")
     try:
         result = repair_document(
             document_id=document_id,

@@ -95,6 +95,9 @@ export default function AdminPage() {
   const [repairingDocumentId, setRepairingDocumentId] = useState<string | null>(null);
   const [roleChangeApproved, setRoleChangeApproved] = useState(false);
   const [roleChangeTicket, setRoleChangeTicket] = useState("");
+  const sessionPermissions = session?.user.permissions ?? [];
+  const canManageUsers = sessionPermissions.includes("*") || sessionPermissions.includes("users.manage");
+  const canReadAudit = sessionPermissions.includes("*") || sessionPermissions.includes("audit.read");
 
   const availableTenantIds = useMemo(() => tenants.map((tenant) => tenant.tenant_id), [tenants]);
   const totalQdrantPoints = useMemo(
@@ -152,12 +155,22 @@ export default function AdminPage() {
     let active = true;
     setLoading(true);
     setError(null);
-    Promise.all([api.admin.tenants.list(), api.admin.users.list(), api.admin.events.list({ limit: 12 }), api.admin.runtime()])
-      .then(([tenantPayload, userPayload, eventsPayload, runtimePayload]) => {
+    const requests: Promise<unknown>[] = [api.admin.tenants.list(), api.admin.runtime()];
+    if (canManageUsers) {
+      requests.push(api.admin.users.list(), api.admin.events.list({ limit: 12 }));
+    }
+    Promise.all(requests)
+      .then((payloads) => {
         if (!active) return;
+        const [tenantPayload, runtimePayload, userPayload, eventsPayload] = payloads as [
+          EnterpriseTenant[],
+          { items: AdminTenantRuntimeSummary[]; qdrant_collection: string },
+          EnterpriseUserRecord[] | undefined,
+          { items: AdminEvent[] } | undefined,
+        ];
         setTenants(tenantPayload);
-        setUsers(userPayload);
-        setEvents(eventsPayload.items);
+        setUsers(userPayload ?? []);
+        setEvents(eventsPayload?.items ?? []);
         setRuntime(runtimePayload.items);
         setRuntimeCollection(runtimePayload.qdrant_collection);
       })
@@ -171,7 +184,7 @@ export default function AdminPage() {
     return () => {
       active = false;
     };
-  }, [refreshToken]);
+  }, [canManageUsers, refreshToken]);
 
   useEffect(() => {
     if (selectedTenantId === "all" && runtime.length) return;
@@ -197,30 +210,40 @@ export default function AdminPage() {
     }
 
     setDetailLoading(true);
-    Promise.all([
-      api.admin.events.list({ limit: 20, workspace_id: workspaceId }),
-      api.admin.alerts(workspaceId, 7),
-      api.admin.audits(workspaceId, { days: 30, limit: 8 }),
-      api.admin.repairs(workspaceId, { days: 30, limit: 8 }),
-    ])
-      .then(([eventsPayload, alertsPayload, auditsPayload, repairsPayload]) => {
+    const detailRequests: Promise<unknown>[] = [api.admin.alerts(workspaceId, 7)];
+    if (canReadAudit) {
+      detailRequests.unshift(api.admin.events.list({ limit: 20, workspace_id: workspaceId }));
+      detailRequests.push(api.admin.audits(workspaceId, { days: 30, limit: 8 }), api.admin.repairs(workspaceId, { days: 30, limit: 8 }));
+    }
+    Promise.all(detailRequests)
+      .then((payloads) => {
         if (!active) return;
-        setEvents((current) => {
-          const others = current.filter((event) => {
-            if (event.tenant_id === selectedRuntime.tenant_id) return false;
-            const eventWorkspaceId =
-              event.metadata && typeof event.metadata === "object" && "workspace_id" in event.metadata
-                ? String(event.metadata.workspace_id ?? "")
-                : event.target_id;
-            return eventWorkspaceId !== workspaceId;
+        const hasEvents = canReadAudit;
+        const eventsPayload = hasEvents ? (payloads[0] as { items: AdminEvent[] }) : null;
+        const alertsPayload = (payloads[hasEvents ? 1 : 0] as { items: ObservabilityAlert[] });
+        const auditsPayload = hasEvents ? (payloads[2] as { items: AuditLogEvent[] }) : null;
+        const repairsPayload = hasEvents ? (payloads[3] as { items: RepairLogEvent[] }) : null;
+        if (eventsPayload) {
+          setEvents((current) => {
+            const others = current.filter((event) => {
+              if (event.tenant_id === selectedRuntime.tenant_id) return false;
+              const eventWorkspaceId =
+                event.metadata && typeof event.metadata === "object" && "workspace_id" in event.metadata
+                  ? String(event.metadata.workspace_id ?? "")
+                  : event.target_id;
+              return eventWorkspaceId !== workspaceId;
+            });
+            return [...others, ...eventsPayload.items].sort((a, b) => b.timestamp.localeCompare(a.timestamp)).slice(0, 48);
           });
-          return [...others, ...eventsPayload.items].sort((a, b) => b.timestamp.localeCompare(a.timestamp)).slice(0, 48);
-        });
-        setSelectedWorkspaceEvents(eventsPayload.items);
+          setSelectedWorkspaceEvents(eventsPayload.items);
+          setSelectedCleanupEvents(eventsPayload.items.filter((event) => event.action === "runtime.cleanup_operational"));
+        } else {
+          setSelectedWorkspaceEvents([]);
+          setSelectedCleanupEvents([]);
+        }
         setSelectedAlerts(alertsPayload.items);
-        setSelectedAudits(auditsPayload.items);
-        setSelectedRepairs(repairsPayload.items);
-        setSelectedCleanupEvents(eventsPayload.items.filter((event) => event.action === "runtime.cleanup_operational"));
+        setSelectedAudits(auditsPayload?.items ?? []);
+        setSelectedRepairs(repairsPayload?.items ?? []);
         setLatestAuditReport(null);
         setLatestBatchRepair(null);
         setLatestPruneResult(null);
@@ -237,7 +260,7 @@ export default function AdminPage() {
     return () => {
       active = false;
     };
-  }, [selectedRuntime, refreshToken]);
+  }, [canReadAudit, refreshToken, selectedRuntime]);
 
   const closeDrawer = () => {
     setDrawerMode(null);
@@ -351,7 +374,7 @@ export default function AdminPage() {
           tenant_id: userForm.tenant_id,
           status: userForm.status,
         };
-        if (previousUser?.role === "admin" && userForm.role !== "admin") {
+        if ((previousUser?.role === "admin" || previousUser?.role === "super_admin") && userForm.role !== "super_admin" && userForm.role !== "admin") {
           patch.approve_sensitive_change = roleChangeApproved;
           patch.approval_ticket = roleChangeTicket.trim() || undefined;
         }
@@ -559,14 +582,18 @@ export default function AdminPage() {
         description={ROUTE_META["/admin"].description}
         actions={
           <>
-            <Button variant="secondary" onClick={openTenantCreate}>
-              <Plus size={16} />
-              Novo tenant
-            </Button>
-            <Button variant="secondary" onClick={openUserCreate}>
-              <Plus size={16} />
-              Novo usuário
-            </Button>
+            {canManageUsers ? (
+              <>
+                <Button variant="secondary" onClick={openTenantCreate}>
+                  <Plus size={16} />
+                  Novo tenant
+                </Button>
+                <Button variant="secondary" onClick={openUserCreate}>
+                  <Plus size={16} />
+                  Novo usuário
+                </Button>
+              </>
+            ) : null}
             <Button variant="ghost" onClick={() => setRefreshToken((current) => current + 1)}>
               <RefreshCcw size={16} />
               Atualizar
@@ -693,21 +720,25 @@ export default function AdminPage() {
                     </td>
                     <td>{tenant.document_count}</td>
                     <td>
-                      <div className="page-actions" style={{ gap: 8 }}>
-                        <Button variant="ghost" type="button" onClick={() => openTenantEdit(tenant)}>
-                          <PencilLine size={14} />
-                          Editar
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          type="button"
-                          onClick={() => removeTenant(tenant)}
-                          disabled={saving || tenant.tenant_id === "default" || tenant.document_count > 0}
-                        >
-                          <Trash2 size={14} />
-                          Remover
-                        </Button>
-                      </div>
+                      {canManageUsers ? (
+                        <div className="page-actions" style={{ gap: 8 }}>
+                          <Button variant="ghost" type="button" onClick={() => openTenantEdit(tenant)}>
+                            <PencilLine size={14} />
+                            Editar
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            type="button"
+                            onClick={() => removeTenant(tenant)}
+                            disabled={saving || tenant.tenant_id === "default" || tenant.document_count > 0}
+                          >
+                            <Trash2 size={14} />
+                            Remover
+                          </Button>
+                        </div>
+                      ) : (
+                        <span className="thin">somente leitura</span>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -717,12 +748,12 @@ export default function AdminPage() {
             <EmptyState
               title="Sem tenants"
               description="O catálogo de tenants ainda não possui registros."
-              action={
+              action={canManageUsers ? (
                 <Button onClick={openTenantCreate}>
                   <Plus size={16} />
                   Criar tenant
                 </Button>
-              }
+              ) : undefined}
             />
           )}
         </Card>
@@ -738,7 +769,9 @@ export default function AdminPage() {
               identities
             </Badge>
           </div>
-          {loading ? (
+          {!canManageUsers ? (
+            <EmptyState title="Governança restrita" description="Seu perfil pode operar runtime, mas não gerencia usuários." />
+          ) : loading ? (
             <Skeleton className="skeleton" />
           ) : users.length ? (
             <Table>
@@ -1460,11 +1493,15 @@ export default function AdminPage() {
               onChange={(event) => setUserForm((current) => ({ ...current, role: event.target.value as EnterpriseRole }))}
             >
               <option value="viewer">viewer</option>
+              <option value="auditor">auditor</option>
               <option value="operator">operator</option>
-              <option value="admin">admin</option>
+              <option value="admin_rag">admin_rag</option>
+              <option value="super_admin">super_admin</option>
             </Select>
           </label>
-          {drawerMode === "user-edit" && users.find((item) => item.user_id === editingUserId)?.role === "admin" && userForm.role !== "admin" ? (
+          {drawerMode === "user-edit" &&
+          ["admin", "super_admin"].includes(users.find((item) => item.user_id === editingUserId)?.role ?? "") &&
+          !["admin", "super_admin"].includes(userForm.role) ? (
             <>
               <label className="ui-label">
                 Ticket de aprovação
@@ -1477,7 +1514,7 @@ export default function AdminPage() {
                   <option value="yes">sim</option>
                 </Select>
               </label>
-              <p className="thin">Demover um admin exige aprovação manual explícita e trilha auditável.</p>
+              <p className="thin">Demover um super_admin exige aprovação manual explícita e trilha auditável.</p>
             </>
           ) : null}
           <label className="ui-label">

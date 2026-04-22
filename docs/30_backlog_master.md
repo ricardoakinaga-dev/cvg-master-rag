@@ -196,6 +196,60 @@
 - **risco:** Baixo
 - **impacto:** Baixo
 
+### ITEM 5
+- **título:** MFA para acessos internos sensíveis
+- **descrição:** Segundo fator para `super_admin` e operações críticas de governança
+- **módulo:** Auth
+- **dependência:** Auth access hardening concluído
+- **fase:** Future
+- **risco:** Médio
+- **impacto:** Alto
+
+### ITEM 6
+- **título:** SSO corporativo
+- **descrição:** Login federado para ambientes enterprise internos
+- **módulo:** Auth
+- **dependência:** Papéis e sessões estáveis
+- **fase:** Future
+- **risco:** Médio
+- **impacto:** Alto
+
+### ITEM 7
+- **título:** Device and session management
+- **descrição:** Inventário de dispositivos/sessões, revogação seletiva e visibilidade por usuário
+- **módulo:** Auth
+- **dependência:** Sessões revogáveis implementadas
+- **fase:** Future
+- **risco:** Baixo
+- **impacto:** Médio
+
+### ITEM 8
+- **título:** IP allowlist por perfil
+- **descrição:** Restringir `super_admin` e superfícies sensíveis a ranges internos aprovados
+- **módulo:** Security
+- **dependência:** Telemetria de IP consistente
+- **fase:** Future
+- **risco:** Médio
+- **impacto:** Médio
+
+### ITEM 9
+- **título:** Approval workflow para mudanças sensíveis
+- **descrição:** Aprovação formal para promoção de privilégio, reset administrativo e config sensível
+- **módulo:** Governance
+- **dependência:** Trilha de auditoria endurecida
+- **fase:** Future
+- **risco:** Médio
+- **impacto:** Alto
+
+### ITEM 10
+- **título:** ABAC incremental
+- **descrição:** Evoluir de RBAC puro para políticas por recurso, workspace e origem de dado quando houver necessidade real
+- **módulo:** Auth
+- **dependência:** RBAC estável e inventário de recursos sensíveis
+- **fase:** Future
+- **risco:** Médio
+- **impacto:** Médio
+
 ---
 
 ## 📌 REGRAS DE USO

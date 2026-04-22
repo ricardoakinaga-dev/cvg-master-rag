@@ -186,3 +186,49 @@ def test_admin_can_read_slo_and_traces_for_foreign_workspace(monkeypatch):
     assert traces.status_code == 200, traces.text
     assert slo.json()["workspace_id"] == "northwind"
     assert traces.json()["workspace_id"] == "northwind"
+
+
+def test_viewer_cannot_gain_document_upload_permission():
+    from api.main import _require_permission, login
+    from fastapi import HTTPException
+    from models.schemas import EnterpriseSession, LoginRequest
+
+    payload = login(LoginRequest(email="viewer@demo.local", password="demo1234", tenant_id="default"))
+    session = EnterpriseSession(**payload)
+
+    with pytest.raises(HTTPException) as exc_info:
+        _require_permission(session, "documents.upload", workspace_id="default")
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail["error"] == "forbidden"
+
+
+def test_admin_password_reset_token_can_rotate_credentials_and_revoke_old_sessions():
+    from services.enterprise_service import admin_issue_password_reset, confirm_password_reset, get_session, login
+
+    initial = login(email="operator@demo.local", password="demo1234", tenant_id="default")
+    token = initial["session_token"]
+
+    issued = admin_issue_password_reset("user-operator", requested_by="user-admin", expires_in_minutes=30)
+    assert issued["token"]
+    confirm_password_reset(issued["token"], "ComplexPass123!")
+
+    current = get_session(token)
+    assert current["authenticated"] is False
+    refreshed = login(email="operator@demo.local", password="ComplexPass123!", tenant_id="default")
+    assert refreshed["authenticated"] is True
+
+
+def test_admin_rag_has_runtime_permission_without_user_governance():
+    from api.main import _require_permission
+    from fastapi import HTTPException
+    from models.schemas import EnterpriseSession
+    from services.enterprise_service import login
+
+    payload = login(email="adminrag@demo.local", password="demo1234", tenant_id="default")
+    session = EnterpriseSession(**payload)
+
+    assert _require_permission(session, "runtime.manage", workspace_id="default").user.role == "admin_rag"
+
+    with pytest.raises(HTTPException):
+        _require_permission(session, "users.manage", workspace_id="default")

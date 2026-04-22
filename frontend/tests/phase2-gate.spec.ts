@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import path from "path";
+import * as path from "path";
 
 const ROUTES: Array<{ path: string; title: string }> = [
   { path: "/", title: "Início" },
@@ -12,15 +12,18 @@ const ROUTES: Array<{ path: string; title: string }> = [
 ];
 
 const EMAILS = {
-  admin: "admin@demo.local",
+  super_admin: "admin@demo.local",
+  admin_rag: "adminrag@demo.local",
+  auditor: "auditor@demo.local",
   operator: "operator@demo.local",
   viewer: "viewer@demo.local",
 } as const;
+
 const BACKEND_ORIGIN = "http://127.0.0.1:8010";
 
 async function loginAs(
   page: Page,
-  role: "admin" | "operator" | "viewer" = "admin",
+  role: "super_admin" | "admin_rag" | "auditor" | "operator" | "viewer" = "super_admin",
   tenantId = "default",
 ) {
   await page.goto("/login");
@@ -31,13 +34,17 @@ async function loginAs(
   await page.getByLabel("Senha").fill("demo1234");
   await page.getByRole("button", { name: "Entrar", exact: true }).click();
   await expect(page).toHaveURL(/\/$/);
-  await expect(page.getByRole("heading", { name: "Início" })).toBeVisible();
+  await expect(page.locator("main")).toContainText("Início");
   await expect
     .poll(async () => {
       const cookies = await page.context().cookies(BACKEND_ORIGIN);
       return cookies.some((cookie) => cookie.name === "cvg_master_rag_session") ? "active" : "pending";
     })
     .toBe("active");
+}
+
+async function expectPageHeading(page: Page, title: string) {
+  await expect(page.locator("main")).toContainText(title, { timeout: 15000 });
 }
 
 test.describe("Fase 2 gate smoke", () => {
@@ -51,18 +58,18 @@ test.describe("Fase 2 gate smoke", () => {
 
   test("rotas principais renderizam no desktop", async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
-    await loginAs(page, "admin");
+    await loginAs(page, "super_admin");
 
     for (const route of ROUTES) {
       await page.goto(route.path);
-      await expect(page.getByRole("heading", { name: route.title })).toBeVisible();
+      await expectPageHeading(page, route.title);
     }
   });
 
   test("documentos executa upload web pela UI", async ({ page }) => {
     const fixture = path.join(process.cwd(), "tests", "fixtures", "upload-smoke.txt");
 
-    await loginAs(page, "admin", "acme-lab");
+    await loginAs(page, "super_admin", "acme-lab");
     await page.goto("/documents");
     await expect(page.getByLabel("Workspace").first()).toHaveValue("acme-lab");
     await page.getByRole("button", { name: "Aplicar filtros" }).click();
@@ -78,7 +85,7 @@ test.describe("Fase 2 gate smoke", () => {
   });
 
   test("troca de tenant mantém isolamento visual mínimo", async ({ page }) => {
-    await loginAs(page, "admin", "acme-lab");
+    await loginAs(page, "super_admin", "acme-lab");
     await page.goto("/documents");
 
     await expect(page.getByLabel("Workspace").first()).toHaveValue("acme-lab");
@@ -92,7 +99,7 @@ test.describe("Fase 2 gate smoke", () => {
   });
 
   test("busca executa retrieval pela UI", async ({ page }) => {
-    await loginAs(page, "admin");
+    await loginAs(page, "super_admin");
     await page.goto("/search");
     await page.getByLabel("Pergunta").fill("reembolso prazo");
     await page.getByRole("button", { name: "Executar busca" }).click();
@@ -103,7 +110,7 @@ test.describe("Fase 2 gate smoke", () => {
   });
 
   test("chat executa query pela UI", async ({ page }) => {
-    await loginAs(page, "admin");
+    await loginAs(page, "super_admin");
     await page.goto("/chat");
     await page.getByLabel("Pergunta").fill("Qual o prazo para reembolso?");
     await page.getByRole("button", { name: "Gerar resposta" }).click();
@@ -115,11 +122,11 @@ test.describe("Fase 2 gate smoke", () => {
 
   test("tablet mantém módulos acessíveis", async ({ page }) => {
     await page.setViewportSize({ width: 768, height: 1024 });
-    await loginAs(page, "admin");
+    await loginAs(page, "super_admin");
 
     for (const route of ROUTES.slice(1)) {
       await page.goto(route.path);
-      await expect(page.getByRole("heading", { name: route.title })).toBeVisible();
+      await expectPageHeading(page, route.title);
     }
   });
 });

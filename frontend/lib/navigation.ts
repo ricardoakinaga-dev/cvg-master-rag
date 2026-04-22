@@ -1,17 +1,16 @@
 import type { EnterpriseRole } from "@/types";
 
 export const NAV_ITEMS = [
-  { href: "/", label: "Início", description: "Visão geral", minRole: "viewer" },
-  { href: "/documents", label: "Documentos", description: "Upload e catálogo", minRole: "viewer" },
-  { href: "/search", label: "Busca", description: "Retrieval e filtros", minRole: "viewer" },
-  { href: "/chat", label: "Chat", description: "Perguntas e respostas", minRole: "viewer" },
-  { href: "/admin", label: "Admin", description: "Tenants e usuários", minRole: "admin" },
-  { href: "/dashboard", label: "Dashboard", description: "Métricas e KPIs", minRole: "operator" },
-  { href: "/audit", label: "Auditoria", description: "Qualidade e revisão", minRole: "operator" },
+  { href: "/", label: "Início", description: "Visão geral", allowedRoles: ["viewer", "operator", "auditor", "admin_rag", "super_admin", "admin"] as EnterpriseRole[] },
+  { href: "/documents", label: "Documentos", description: "Upload e catálogo", allowedRoles: ["viewer", "operator", "auditor", "admin_rag", "super_admin", "admin"] as EnterpriseRole[] },
+  { href: "/search", label: "Busca", description: "Retrieval e filtros", allowedRoles: ["viewer", "operator", "auditor", "admin_rag", "super_admin", "admin"] as EnterpriseRole[] },
+  { href: "/chat", label: "Chat", description: "Perguntas e respostas", allowedRoles: ["viewer", "operator", "auditor", "admin_rag", "super_admin", "admin"] as EnterpriseRole[] },
+  { href: "/admin", label: "Admin", description: "Governança e runtime", allowedRoles: ["admin_rag", "super_admin", "admin"] as EnterpriseRole[] },
+  { href: "/dashboard", label: "Dashboard", description: "Métricas e KPIs", allowedRoles: ["operator", "auditor", "admin_rag", "super_admin", "admin"] as EnterpriseRole[] },
+  { href: "/audit", label: "Auditoria", description: "Qualidade e revisão", allowedRoles: ["auditor", "admin_rag", "super_admin", "admin"] as EnterpriseRole[] },
 ] as const;
 
 export type AppRoute = (typeof NAV_ITEMS)[number]["href"];
-const ROLE_ORDER: Record<EnterpriseRole, number> = { viewer: 0, operator: 1, admin: 2 };
 
 export const ROUTE_META: Record<string, { title: string; description: string; eyebrow: string }> = {
   "/": {
@@ -70,9 +69,9 @@ export function getBreadcrumbs(pathname: string) {
 export function isRouteAllowed(pathname: string, role: EnterpriseRole) {
   const item = NAV_ITEMS.find((nav) => nav.href === pathname);
   if (!item) return true;
-  return ROLE_ORDER[role] >= ROLE_ORDER[item.minRole];
+  return item.allowedRoles.includes(role);
 }
 
 export function getAllowedNavItems(role: EnterpriseRole) {
-  return NAV_ITEMS.filter((item) => ROLE_ORDER[role] >= ROLE_ORDER[item.minRole]);
+  return NAV_ITEMS.filter((item) => item.allowedRoles.includes(role));
 }

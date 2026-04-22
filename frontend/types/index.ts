@@ -238,7 +238,7 @@ export type DocumentListResponse = {
   offset: number;
 };
 
-export type EnterpriseRole = "admin" | "operator" | "viewer";
+export type EnterpriseRole = "super_admin" | "admin_rag" | "auditor" | "operator" | "viewer" | "admin";
 
 export type EnterpriseTenant = {
   tenant_id: string;
@@ -278,6 +278,8 @@ export type EnterpriseUserRecord = {
   role: EnterpriseRole;
   tenant_id: string;
   status: "active" | "invited" | "disabled";
+  permissions?: string[];
+  must_change_password?: boolean;
 };
 
 export type EnterpriseUserCreate = {
@@ -292,6 +294,55 @@ export type EnterpriseUserCreate = {
 export type EnterpriseUserUpdate = Partial<Pick<EnterpriseUserCreate, "name" | "email" | "role" | "tenant_id" | "status">> & {
   approve_sensitive_change?: boolean;
   approval_ticket?: string;
+  must_change_password?: boolean;
+};
+
+export type PasswordChangeRequest = {
+  current_password: string;
+  new_password: string;
+};
+
+export type PasswordResetRequestPayload = {
+  email: string;
+  tenant_id?: string | null;
+};
+
+export type PasswordResetConfirmRequest = {
+  token: string;
+  new_password: string;
+};
+
+export type UserSessionRecord = {
+  session_token: string;
+  user_id: string;
+  tenant_id: string;
+  role: EnterpriseRole;
+  permissions: string[];
+  created_at: string;
+  last_seen_at?: string | null;
+  expires_at: string;
+  revoked_at?: string | null;
+  revoked_reason?: string | null;
+  current: boolean;
+  ip?: string | null;
+  user_agent?: string | null;
+};
+
+export type UserSessionListResponse = {
+  items: UserSessionRecord[];
+  total: number;
+};
+
+export type SessionRevokeRequest = {
+  session_token?: string;
+  user_id?: string;
+  revoke_all?: boolean;
+  reason?: string;
+};
+
+export type SessionRevokeResponse = {
+  revoked: number;
+  message: string;
 };
 
 export type AdminEvent = {

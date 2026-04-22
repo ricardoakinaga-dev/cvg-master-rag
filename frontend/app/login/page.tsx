@@ -12,9 +12,9 @@ function LoginContent() {
   const { pushToast } = useToast();
   const { session, signIn } = useEnterpriseSession();
   const tenants = session?.available_tenants ?? [];
-  const [role, setRole] = useState<"admin" | "operator" | "viewer">("viewer");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
+  const [role, setRole] = useState<"super_admin" | "admin_rag" | "auditor" | "operator" | "viewer">("super_admin");
+  const [email, setEmail] = useState("admin@demo.local");
+  const [password, setPassword] = useState("demo1234");
   const [tenantId, setTenantId] = useState(session?.active_tenant.tenant_id ?? "default");
   const [loading, setLoading] = useState(false);
   const [nextPath, setNextPath] = useState("/");
@@ -80,7 +80,9 @@ function LoginContent() {
                   }}
                   autoComplete="off"
                 >
-                  <option value="admin">admin</option>
+                  <option value="super_admin">super_admin</option>
+                  <option value="admin_rag">admin_rag</option>
+                  <option value="auditor">auditor</option>
                   <option value="operator">operator</option>
                   <option value="viewer">viewer</option>
                 </Select>
@@ -91,8 +93,8 @@ function LoginContent() {
                 <Input
                   value={email}
                   onChange={(event) => setEmail(event.target.value)}
-                  placeholder="seu-email@dominio"
-                  autoComplete="off"
+                  placeholder="admin@demo.local"
+                  autoComplete="username"
                   autoCapitalize="none"
                   spellCheck={false}
                 />
@@ -105,7 +107,7 @@ function LoginContent() {
                   value={password}
                   onChange={(event) => setPassword(event.target.value)}
                   placeholder="Digite sua senha"
-                  autoComplete="new-password"
+                  autoComplete="current-password"
                 />
               </label>
 
@@ -117,11 +119,15 @@ function LoginContent() {
                   disabled={!tenants.length}
                   autoComplete="off"
                 >
-                  {tenants.map((tenant) => (
-                    <option key={tenant.tenant_id} value={tenant.tenant_id}>
-                      {tenant.name} · {tenant.workspace_id}
-                    </option>
-                  ))}
+                  {tenants.length ? (
+                    tenants.map((tenant) => (
+                      <option key={tenant.tenant_id} value={tenant.tenant_id}>
+                        {tenant.name} · {tenant.workspace_id}
+                      </option>
+                    ))
+                  ) : (
+                    <option value={tenantId}>Carregando tenants...</option>
+                  )}
                 </Select>
               </label>
             </div>

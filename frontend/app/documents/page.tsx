@@ -154,20 +154,21 @@ export default function DocumentsPage() {
     setUploadFeedback(null);
     try {
       const workspaceId = activeWorkspaceId;
+      const uploadedFileName = file.name;
       await api.documents.upload(file, workspaceId);
-      const description = `${file.name} foi incorporado ao corpus de ${workspaceId}.`;
-      pushToast({
-        title: "Upload concluído",
-        description,
-        intent: "success",
-      });
+      const description = `${uploadedFileName} foi incorporado ao corpus de ${workspaceId}.`;
       setUploadFeedback({
         intent: "success",
         title: "Documento enviado",
         description,
       });
-      setFile(null);
       setShowUpload(false);
+      setFile(null);
+      pushToast({
+        title: "Upload concluído",
+        description,
+        intent: "success",
+      });
       setPage(0);
       setAppliedFilters({ ...filters, workspace_id: workspaceId });
     } catch (err) {

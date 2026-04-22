@@ -87,6 +87,12 @@ def enterprise_headers(
     return {"Authorization": f"Bearer {payload['session_token']}"}
 
 
+@pytest.fixture(autouse=True)
+def reset_enterprise_runtime_state():
+    reset_admin_state()
+    yield
+
+
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
 @pytest.fixture
@@ -2985,7 +2991,7 @@ class TestEnterpriseSessionContracts:
 
         payload = login(LoginRequest(email="admin@demo.local", password="demo1234", tenant_id="acme-lab"))
         assert payload["authenticated"] is True
-        assert payload["user"]["role"] == "admin"
+        assert payload["user"]["role"] == "super_admin"
         assert payload["active_tenant"]["tenant_id"] == "acme-lab"
         assert payload["session_token"]
 
@@ -3108,7 +3114,7 @@ class TestEnterpriseAdminContracts:
                 user_id="user-enterprise",
                 name="Erin Enterprise",
                 email="erin@example.com",
-                password="secret789",
+                password="Secret789!AB",
                 role="operator",
                 tenant_id="default",
                 status="invited",
@@ -3121,16 +3127,16 @@ class TestEnterpriseAdminContracts:
 
         updated = admin_update_user(
             "user-enterprise",
-            EnterpriseUserUpdate(role="admin", status="active", password="newpass123"),
+            EnterpriseUserUpdate(role="admin", status="active", password="NewPass123!AB"),
             session,
         )
-        assert updated["role"] == "admin"
+        assert updated["role"] == "super_admin"
         assert updated["status"] == "active"
 
         # Verify password was actually updated
         from services.admin_service import get_user, verify_password
         user_after = get_user("user-enterprise")
-        assert verify_password(user_after, "newpass123") is True
+        assert verify_password(user_after, "NewPass123!AB") is True
 
         listed = admin_list_users(session)
         assert any(user["user_id"] == "user-enterprise" for user in listed)
@@ -3153,7 +3159,7 @@ class TestEnterpriseAdminContracts:
                 user_id="user-none-test",
                 name="None Test",
                 email="none@test.com",
-                password="originalpw",
+                password="OriginalPw123!",
                 tenant_id="default",
                 status="active",
             ),
@@ -3172,7 +3178,7 @@ class TestEnterpriseAdminContracts:
         hash_after = get_user("user-none-test").get("password_hash")
         assert hash_after == hash_before
         # original password still works
-        assert verify_password(get_user("user-none-test"), "originalpw") is True
+        assert verify_password(get_user("user-none-test"), "OriginalPw123!") is True
 
         # Update without password key at all
         updated2 = admin_update_user(
@@ -3200,7 +3206,7 @@ class TestEnterpriseAdminContracts:
                 user_id="sess-pw-user",
                 name="Sess PW",
                 email="sesspw@test.com",
-                password="initial123",
+                password="Initial123!AB",
                 tenant_id="default",
                 status="active",
             ),
@@ -3208,7 +3214,7 @@ class TestEnterpriseAdminContracts:
         )
 
         # Login to get a session token
-        login_resp = login(LoginRequest(email="sesspw@test.com", password="initial123", tenant_id="default"))
+        login_resp = login(LoginRequest(email="sesspw@test.com", password="Initial123!AB", tenant_id="default"))
         token = login_resp["session_token"]
 
         # Session works before password change
@@ -3218,7 +3224,7 @@ class TestEnterpriseAdminContracts:
         # Admin changes the user's password
         admin_update_user(
             "sess-pw-user",
-            EnterpriseUserUpdate(password="newpassword456"),
+            EnterpriseUserUpdate(password="NewPassword456!"),
             admin_session,
         )
 
@@ -3228,7 +3234,7 @@ class TestEnterpriseAdminContracts:
         assert s["session_state"] == "expired"
 
         # New password works for login
-        login2 = login(LoginRequest(email="sesspw@test.com", password="newpassword456", tenant_id="default"))
+        login2 = login(LoginRequest(email="sesspw@test.com", password="NewPassword456!", tenant_id="default"))
         assert login2["authenticated"] is True
 
         admin_delete_user("sess-pw-user", admin_session)
@@ -3247,14 +3253,14 @@ class TestEnterpriseAdminContracts:
                 user_id="sess-status-user",
                 name="Sess Status",
                 email="sessstatus@test.com",
-                password="pw123",
+                password="StatusPass123!",
                 tenant_id="default",
                 status="active",
             ),
             admin_session,
         )
 
-        login_resp = login(LoginRequest(email="sessstatus@test.com", password="pw123", tenant_id="default"))
+        login_resp = login(LoginRequest(email="sessstatus@test.com", password="StatusPass123!", tenant_id="default"))
         token = login_resp["session_token"]
 
         # Session works
@@ -3284,7 +3290,7 @@ class TestEnterpriseAdminContracts:
         assert s2["authenticated"] is False
 
         # Fresh login works
-        login2 = login(LoginRequest(email="sessstatus@test.com", password="pw123", tenant_id="default"))
+        login2 = login(LoginRequest(email="sessstatus@test.com", password="StatusPass123!", tenant_id="default"))
         assert login2["authenticated"] is True
 
         admin_delete_user("sess-status-user", admin_session)
@@ -3303,14 +3309,14 @@ class TestEnterpriseAdminContracts:
                 user_id="sess-del-user",
                 name="Sess Del",
                 email="sessdel@test.com",
-                password="pwdel",
+                password="DeletePass123!",
                 tenant_id="default",
                 status="active",
             ),
             admin_session,
         )
 
-        login_resp = login(LoginRequest(email="sessdel@test.com", password="pwdel", tenant_id="default"))
+        login_resp = login(LoginRequest(email="sessdel@test.com", password="DeletePass123!", tenant_id="default"))
         token = login_resp["session_token"]
 
         # Session works
@@ -3349,7 +3355,7 @@ class TestEnterpriseAdminContracts:
                 user_id="salt-test-user",
                 name="Salt Test",
                 email="saltuser@test.com",
-                password="saltpw123",
+                password="SaltPw123!AB",
                 tenant_id="default",
                 status="active",
             ),
@@ -3429,6 +3435,21 @@ class TestEnterpriseAdminContracts:
 
         reloaded = importlib.reload(admin_service)
         assert any(item["tenant_id"] == "persisted-tenant" for item in reloaded.list_tenants())
+
+    def test_reset_admin_state_clears_login_rate_limit_runtime_state(self):
+        from services.enterprise_service import login
+
+        reset_admin_state()
+
+        for _ in range(5):
+            with pytest.raises(ValueError):
+                login("admin@demo.local", "wrong-password", "default")
+
+        reset_admin_state()
+
+        payload = login("admin@demo.local", "demo1234", "default")
+        assert payload["authenticated"] is True
+        assert payload["user"]["email"] == "admin@demo.local"
 
     def test_admin_events_endpoint_returns_sanitized_metadata(self, tmp_path, monkeypatch):
         import json

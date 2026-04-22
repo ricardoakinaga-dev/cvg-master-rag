@@ -25,9 +25,14 @@ import {
   ObservabilitySLOResponse,
   ObservabilityTraceResponse,
   LogoutResponse,
+  PasswordChangeRequest,
+  PasswordResetConfirmRequest,
+  PasswordResetRequestPayload,
   RecoveryRequest,
   RepairLogListResponse,
   RecoveryResponse,
+  SessionRevokeRequest,
+  SessionRevokeResponse,
   TenantSwitchRequest,
   QueryLogResponse,
   QueryResponse,
@@ -35,6 +40,7 @@ import {
   RetrievalProfile,
   SearchFilters,
   SearchResponse,
+  UserSessionListResponse,
 } from "@/types";
 
 export class ApiError extends Error {
@@ -116,6 +122,31 @@ export const api = {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(params),
       }),
+    requestPasswordReset: (params: PasswordResetRequestPayload) =>
+      requestJson<RecoveryResponse>("/auth/request-password-reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(params),
+      }),
+    confirmPasswordReset: (params: PasswordResetConfirmRequest) =>
+      requestJson<RecoveryResponse>("/auth/confirm-password-reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(params),
+      }),
+    changePassword: (params: PasswordChangeRequest) =>
+      requestJson<RecoveryResponse>("/auth/change-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(params),
+      }),
+    sessions: () => requestJson<UserSessionListResponse>("/auth/sessions"),
+    revokeSessions: (params: SessionRevokeRequest) =>
+      requestJson<SessionRevokeResponse>("/auth/sessions/revoke", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(params),
+      }),
     tenants: () => requestJson<EnterpriseTenant[]>("/tenants"),
   },
 
@@ -157,6 +188,15 @@ export const api = {
         requestJson<{ status: string; user_id: string }>(`/admin/users/${encodeURIComponent(userId)}`, {
           method: "DELETE",
         }),
+      resetPassword: (userId: string, reason?: string) =>
+        requestJson<{ status: string; reset_id: string; reset_token: string; expires_at: string }>(
+          `/admin/users/${encodeURIComponent(userId)}/reset-password`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ reason }),
+          },
+        ),
     },
     events: {
       list: (params: { limit?: number; offset?: number; action?: string; tenant_id?: string; workspace_id?: string } = {}) => {

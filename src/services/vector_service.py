@@ -308,9 +308,16 @@ def search_hybrid(
     Returns top_k results with scores.
     """
     start_time = time.time()
-    metadata_map = get_document_registry(request.workspace_id)
+    metadata_map = {
+        **{
+            item["document_id"]: item
+            for item in list_document_items(request.workspace_id, limit=10000, offset=0).get("items", [])
+        },
+        **get_document_registry(request.workspace_id),
+    }
     query_filter = _build_qdrant_filter(request.workspace_id, request.filters)
     candidate_limit = max(request.top_k * 10, 20)
+    canonical_only = not request.filters or request.filters.get("catalog_scope") == "canonical"
 
     # 1. Dense search (embedding query)
     dense_results = []
@@ -351,6 +358,7 @@ def search_hybrid(
             limit=candidate_limit,
             filters=request.filters,
             metadata_map=metadata_map,
+            canonical_only=canonical_only,
         )
 
     # 4. RRF Fusion
@@ -358,11 +366,12 @@ def search_hybrid(
     fused = _apply_post_filters(fused, request.filters, metadata_map)
     for item in fused:
         item["confidence_score"] = _compute_confidence_score(item)
-        # Enrich with document metadata for reranker (filename, tags)
-        if item.get("document_filename") is None or not item.get("tags"):
-            doc_meta = metadata_map.get(item.get("document_id"), {})
-            item["document_filename"] = doc_meta.get("filename")
-            item["tags"] = doc_meta.get("tags") or []
+        doc_meta = metadata_map.get(item.get("document_id"), {})
+        # Enrich with canonical document metadata for reranker (filename, tags).
+        # Operational uploads should not overwrite canonical ranking context when
+        # the query is expected to resolve against the canonical corpus.
+        item["document_filename"] = doc_meta.get("filename")
+        item["tags"] = doc_meta.get("tags") or []
     fused = _dedupe_redundant_candidates(fused)
     fused.sort(
         key=lambda item: (
@@ -479,6 +488,7 @@ def _search_chunks_on_disk(
     limit: int = 20,
     filters: Optional[dict] = None,
     metadata_map: Optional[dict[str, dict]] = None,
+    canonical_only: bool = False,
 ) -> list[dict]:
     """Simple local keyword fallback when Qdrant is unreachable."""
     base_dir = DOCUMENTS_DIR / workspace_id
@@ -501,6 +511,10 @@ def _search_chunks_on_disk(
         for chunk in chunks:
             if chunk.get("workspace_id") != workspace_id:
                 continue
+            if canonical_only:
+                doc_meta = (metadata_map or {}).get(chunk.get("document_id"), {})
+                if doc_meta.get("catalog_scope", "canonical") != "canonical":
+                    continue
 
             chunk_text = str(chunk.get("text", ""))
             chunk_tokens = _tokenize_for_fallback(chunk_text)
@@ -576,6 +590,8 @@ def _bm25_search(
                 "strategy": r.payload.get("strategy"),
                 "dense_score": 0.0,
                 "sparse_score": r.score,
+                "document_filename": r.payload.get("document_filename"),
+                "tags": r.payload.get("tags") or [],
             }
             for r in results
         ]
@@ -974,15 +990,15 @@ def _build_qdrant_filter(workspace_id: str, filters: Optional[dict] = None) -> O
     return Filter(must=must) if must else None
 
 
-def _apply_post_filters(
-    fused_results: list[dict],
-    filters: Optional[dict],
-    metadata_map: dict[str, dict],
-) -> list[dict]:
-    """Apply filters that depend on disk metadata or need uniform fallback behavior."""
-    if not filters:
-        return fused_results
-    return [item for item in fused_results if _matches_filters(item, filters, metadata_map)]
+def _apply_post_filters(candidates: list[dict], filters: Optional[dict], metadata_map: dict[str, dict]) -> list[dict]:
+    if not candidates:
+        return []
+
+    normalized_filters = dict(filters or {})
+    if "catalog_scope" not in normalized_filters:
+        normalized_filters["catalog_scope"] = "canonical"
+
+    return [item for item in candidates if _matches_filters(item, normalized_filters, metadata_map)]
 
 
 def _matches_filters(item: dict, filters: Optional[dict], metadata_map: dict[str, dict]) -> bool:
@@ -993,8 +1009,12 @@ def _matches_filters(item: dict, filters: Optional[dict], metadata_map: dict[str
     document_id = item.get("document_id")
     page_hint = item.get("page_hint")
     metadata = metadata_map.get(document_id, {})
+    catalog_scope = metadata.get("catalog_scope", "canonical")
 
     if filters.get("document_id") and document_id != filters["document_id"]:
+        return False
+
+    if filters.get("catalog_scope") and catalog_scope != filters["catalog_scope"]:
         return False
 
     if filters.get("source_type") and metadata.get("source_type") != filters["source_type"]:

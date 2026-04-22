@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -25,6 +26,52 @@ from services.enterprise_store import (
 # Global salt NOT used for new hashes.
 
 _DEMO_SALT = "fluxpay2024_rag_salt_v1"
+
+ROLE_ALIASES = {
+    "admin": "super_admin",
+}
+
+ROLE_PERMISSIONS: dict[str, list[str]] = {
+    "super_admin": [
+        "*",
+    ],
+    "admin_rag": [
+        "documents.read",
+        "documents.upload",
+        "search.execute",
+        "query.execute",
+        "observability.read",
+        "audit.read",
+        "ingestion.run",
+        "reindex.run",
+        "corpus.audit",
+        "corpus.repair",
+        "runtime.manage",
+    ],
+    "auditor": [
+        "documents.read",
+        "search.execute",
+        "query.execute",
+        "observability.read",
+        "audit.read",
+        "corpus.audit",
+    ],
+    "operator": [
+        "documents.read",
+        "documents.upload",
+        "search.execute",
+        "query.execute",
+        "observability.read",
+        "ingestion.run",
+    ],
+    "viewer": [
+        "documents.read",
+        "search.execute",
+        "query.execute",
+    ],
+}
+
+DEFAULT_ROLE = "viewer"
 
 
 def hash_password(password: str, salt_hex: str | None = None) -> str:
@@ -122,13 +169,42 @@ DEFAULT_TENANTS = [
 DEFAULT_USERS = [
     {
         "user_id": "user-admin",
-        "name": "Ana Admin",
+        "name": "Sara Super Admin",
         "email": "admin@demo.local",
         "password_hash": "$2b$12$demo_salt_fluxpay2024e2fc2e9bfca2ee7ff37f14290c6cb494ecec791da32b",
-        "role": "admin",
+        "role": "super_admin",
         "tenant_id": "default",
         "status": "active",
         "password_changed_at": "2026-01-01T00:00:00Z",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "must_change_password": False,
+    },
+    {
+        "user_id": "user-admin-rag",
+        "name": "Rita RAG Admin",
+        "email": "adminrag@demo.local",
+        "password_hash": "$2b$12$demo_salt_fluxpay2024e2fc2e9bfca2ee7ff37f14290c6cb494ecec791da32b",
+        "role": "admin_rag",
+        "tenant_id": "default",
+        "status": "active",
+        "password_changed_at": "2026-01-01T00:00:00Z",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "must_change_password": False,
+    },
+    {
+        "user_id": "user-auditor",
+        "name": "Alice Auditor",
+        "email": "auditor@demo.local",
+        "password_hash": "$2b$12$demo_salt_fluxpay2024e2fc2e9bfca2ee7ff37f14290c6cb494ecec791da32b",
+        "role": "auditor",
+        "tenant_id": "default",
+        "status": "active",
+        "password_changed_at": "2026-01-01T00:00:00Z",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "must_change_password": False,
     },
     {
         "user_id": "user-operator",
@@ -139,6 +215,9 @@ DEFAULT_USERS = [
         "tenant_id": "default",
         "status": "active",
         "password_changed_at": "2026-01-01T00:00:00Z",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "must_change_password": False,
     },
     {
         "user_id": "user-viewer",
@@ -149,6 +228,9 @@ DEFAULT_USERS = [
         "tenant_id": "default",
         "status": "active",
         "password_changed_at": "2026-01-01T00:00:00Z",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+        "must_change_password": False,
     },
 ]
 
@@ -159,16 +241,96 @@ DEFAULT_ADMIN_STATE = {
 
 
 def _load_state() -> dict:
-    return load_admin_state(DEFAULT_ADMIN_STATE)
+    state = load_admin_state(DEFAULT_ADMIN_STATE)
+    normalized = _normalize_admin_state(state)
+    if normalized != state:
+        save_admin_state(normalized)
+    return normalized
 
 
 def _save_state(state: dict) -> None:
-    save_admin_state(state)
+    save_admin_state(_normalize_admin_state(state))
+
+
+def normalize_role(role: str | None) -> str:
+    normalized = str(role or DEFAULT_ROLE).strip().lower()
+    normalized = ROLE_ALIASES.get(normalized, normalized)
+    return normalized if normalized in ROLE_PERMISSIONS else DEFAULT_ROLE
+
+
+def resolve_permissions_for_role(role: str | None, overrides: dict | None = None) -> list[str]:
+    normalized_role = normalize_role(role)
+    base = list(ROLE_PERMISSIONS.get(normalized_role, ROLE_PERMISSIONS[DEFAULT_ROLE]))
+    if "*" in base:
+        return ["*"]
+
+    resolved = set(base)
+    payload = overrides if isinstance(overrides, dict) else {}
+    for permission in payload.get("add", []) if isinstance(payload.get("add"), list) else []:
+        if isinstance(permission, str) and permission.strip():
+            resolved.add(permission.strip())
+    for permission in payload.get("remove", []) if isinstance(payload.get("remove"), list) else []:
+        if isinstance(permission, str) and permission.strip():
+            resolved.discard(permission.strip())
+    return sorted(resolved)
+
+
+def user_has_permission(user: dict, permission: str) -> bool:
+    permissions = resolve_permissions_for_role(user.get("role"), user.get("permission_overrides"))
+    return "*" in permissions or permission in permissions
+
+
+def _normalize_user(user: dict) -> dict:
+    normalized = deepcopy(user)
+    normalized["email"] = str(normalized.get("email", "")).strip().lower()
+    normalized["role"] = normalize_role(normalized.get("role"))
+    normalized["status"] = normalized.get("status") or "invited"
+    normalized["tenant_id"] = normalized.get("tenant_id") or "default"
+    normalized["must_change_password"] = bool(normalized.get("must_change_password", False))
+    normalized["permission_overrides"] = normalized.get("permission_overrides") if isinstance(normalized.get("permission_overrides"), dict) else {}
+    normalized["created_at"] = normalized.get("created_at") or normalized.get("password_changed_at") or "2026-01-01T00:00:00Z"
+    normalized["updated_at"] = normalized.get("updated_at") or normalized["created_at"]
+    normalized["permissions"] = resolve_permissions_for_role(normalized["role"], normalized["permission_overrides"])
+    return normalized
+
+
+def _normalize_admin_state(state: dict) -> dict:
+    normalized = deepcopy(state)
+    tenants = normalized.get("tenants")
+    users = normalized.get("users")
+    normalized["tenants"] = tenants if isinstance(tenants, list) else deepcopy(DEFAULT_TENANTS)
+    normalized["users"] = [_normalize_user(item) for item in users] if isinstance(users, list) else deepcopy(DEFAULT_USERS)
+    return normalized
+
+
+def validate_password_policy(password: str, *, email: str = "", current_password: str | None = None) -> None:
+    candidate = str(password or "")
+    normalized_email = email.strip().lower()
+    if len(candidate) < 12:
+        raise ValueError("password_policy_too_short")
+    if normalized_email and candidate.strip().lower() == normalized_email:
+        raise ValueError("password_policy_matches_email")
+    classes = 0
+    if re.search(r"[a-z]", candidate):
+        classes += 1
+    if re.search(r"[A-Z]", candidate):
+        classes += 1
+    if re.search(r"[0-9]", candidate):
+        classes += 1
+    if re.search(r"[^A-Za-z0-9]", candidate):
+        classes += 1
+    if classes < 2:
+        raise ValueError("password_policy_not_complex_enough")
+    if current_password is not None and secrets.compare_digest(candidate, current_password):
+        raise ValueError("password_policy_reused_current_password")
 
 
 def reset_admin_state() -> None:
     reset_admin_state_store(DEFAULT_ADMIN_STATE)
     reset_session_state()
+    from services.enterprise_service import reset_rate_limit_state
+
+    reset_rate_limit_state()
 
 
 def list_tenants() -> list[dict]:
@@ -255,7 +417,7 @@ def get_tenant_by_workspace(workspace_id: str) -> Optional[dict]:
 
 
 def list_users() -> list[dict]:
-    return deepcopy(_load_state()["users"])
+    return [deepcopy(_normalize_user(item)) for item in _load_state()["users"]]
 
 
 def _find_user_index(user_id: str) -> Optional[int]:
@@ -303,14 +465,22 @@ def create_user(payload: dict) -> dict:
         raise ValueError(f"user_email_exists:{payload['email']}")
     _ensure_tenant_exists(payload["tenant_id"])
     password = payload.get("password")
+    email = str(payload["email"]).strip().lower()
+    validate_password_policy(password, email=email)
+    role = normalize_role(payload.get("role"))
+    now = _now_iso()
     user = {
         "user_id": user_id,
         "name": payload["name"],
-        "email": payload["email"],
-        "role": payload.get("role", "viewer"),
+        "email": email,
+        "role": role,
         "tenant_id": payload.get("tenant_id", "default"),
         "status": payload.get("status", "invited"),
-        "password_changed_at": _now_iso(),
+        "password_changed_at": now,
+        "created_at": now,
+        "updated_at": now,
+        "must_change_password": bool(payload.get("status", "invited") != "active"),
+        "permission_overrides": {},
     }
     if password:
         salt_hex = secrets.token_hex(16)
@@ -318,7 +488,7 @@ def create_user(payload: dict) -> dict:
         user["password_hash"] = hash_password(password, salt_hex)
     state["users"].append(user)
     _save_state(state)
-    return deepcopy(user)
+    return _normalize_user(user)
 
 
 def update_user(user_id: str, payload: dict) -> dict:
@@ -327,7 +497,7 @@ def update_user(user_id: str, payload: dict) -> dict:
     if index is None:
         raise KeyError(user_id)
     user = state["users"][index]
-    previous_role = user.get("role")
+    previous_role = normalize_role(user.get("role"))
     next_tenant = payload.get("tenant_id")
     if next_tenant is not None:
         _ensure_tenant_exists(next_tenant)
@@ -337,33 +507,42 @@ def update_user(user_id: str, payload: dict) -> dict:
         for item in state["users"]
     ):
         raise ValueError(f"user_email_exists:{next_email}")
-    next_role = payload.get("role")
+    next_role = normalize_role(payload.get("role")) if payload.get("role") is not None else None
     if (
-        previous_role == "admin"
+        previous_role == "super_admin"
         and next_role is not None
-        and next_role != "admin"
+        and next_role != "super_admin"
         and (
             payload.get("approve_sensitive_change") is not True
             or not str(payload.get("approval_ticket") or "").strip()
         )
     ):
         raise ValueError("role_change_requires_approval")
+    if next_email is not None:
+        user["email"] = next_email.strip().lower()
     for field in ("name", "email", "role", "tenant_id", "status"):
         value = payload.get(field)
         if value is not None:
             if field == "status" and value != user.get("status"):
                 user["status_changed_at"] = _now_iso()
+                if value == "disabled":
+                    user["deactivated_at"] = user["status_changed_at"]
             if field == "role" and value != previous_role:
                 user["role_changed_at"] = _now_iso()
-            user[field] = value
+            user[field] = next_role if field == "role" else (value.strip().lower() if field == "email" else value)
     if payload.get("password") is not None:
+        validate_password_policy(payload["password"], email=user.get("email", ""))
         salt_hex = secrets.token_hex(16)
         user["password_salt"] = salt_hex
         user["password_hash"] = hash_password(payload["password"], salt_hex)
         user["password_changed_at"] = _now_iso()
+        user["must_change_password"] = False
+    if payload.get("must_change_password") is not None:
+        user["must_change_password"] = bool(payload["must_change_password"])
+    user["role"] = normalize_role(user.get("role"))
+    user["updated_at"] = _now_iso()
     _save_state(state)
-    return deepcopy(user)
-    return deepcopy(user)
+    return _normalize_user(user)
 
 
 def delete_tenant(tenant_id: str) -> bool:
@@ -396,8 +575,28 @@ def delete_user(user_id: str) -> bool:
     return True
 
 
+def set_user_password(user_id: str, new_password: str, *, must_change_password: bool = False) -> dict:
+    state = _load_state()
+    index = next((idx for idx, item in enumerate(state["users"]) if item["user_id"] == user_id), None)
+    if index is None:
+        raise KeyError(user_id)
+    user = state["users"][index]
+    validate_password_policy(new_password, email=user.get("email", ""))
+    salt_hex = secrets.token_hex(16)
+    user["password_salt"] = salt_hex
+    user["password_hash"] = hash_password(new_password, salt_hex)
+    user["password_changed_at"] = _now_iso()
+    user["updated_at"] = _now_iso()
+    user["must_change_password"] = bool(must_change_password)
+    if user.get("status") == "invited":
+        user["status"] = "active"
+        user["status_changed_at"] = _now_iso()
+    _save_state(state)
+    return _normalize_user(user)
+
+
 def get_accessible_tenants(user: dict) -> list[dict]:
-    if user["role"] == "admin":
+    if normalize_role(user.get("role")) == "super_admin":
         return [tenant for tenant in list_tenants() if tenant["status"] == "active"]
     tenant = get_tenant(user["tenant_id"])
     if not tenant or tenant["status"] != "active":
@@ -413,6 +612,8 @@ def _sanitize_admin_metadata(metadata: dict | None) -> dict:
     payload = deepcopy(metadata or {})
     for key, value in list(payload.items()):
         if "password" in key.lower():
+            payload[key] = "[redacted]"
+        elif "token" in key.lower():
             payload[key] = "[redacted]"
         elif isinstance(value, dict):
             payload[key] = _sanitize_admin_metadata(value)

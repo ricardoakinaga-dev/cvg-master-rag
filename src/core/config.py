@@ -30,6 +30,11 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_EMBEDDING_MODEL", "text-embedding-3-small
 EMBEDDING_DIM = 1536
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
 
+# CORS config
+_raw_cors_origins = [origin.strip() for origin in os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3005,http://127.0.0.1:3005,http://localhost:3010,http://127.0.0.1:3010").split(",") if origin.strip()]
+CORS_ALLOWED_ORIGINS = _raw_cors_origins or ["http://localhost:3000"]
+CORS_ALLOW_CREDENTIALS = os.getenv("CORS_ALLOW_CREDENTIALS", "true").lower() in {"1", "true", "yes", "on"}
+
 # Session config
 SESSION_TTL_HOURS = int(os.getenv("SESSION_TTL_HOURS", "8"))
 

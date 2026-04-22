@@ -3,6 +3,8 @@ from typing import Optional, Literal
 from datetime import datetime
 from uuid import uuid4
 
+EnterpriseRole = Literal["super_admin", "admin_rag", "auditor", "operator", "viewer", "admin"]
+
 
 # ─── Document ───────────────────────────────────────────────
 
@@ -67,7 +69,7 @@ class EnterpriseUser(BaseModel):
     user_id: str
     name: str
     email: str
-    role: Literal["admin", "operator", "viewer"]
+    role: EnterpriseRole
     permissions: list[str] = Field(default_factory=list)
 
 
@@ -105,6 +107,59 @@ class LogoutResponse(BaseModel):
 
 class TenantSwitchRequest(BaseModel):
     tenant_id: str
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class PasswordResetRequestPayload(BaseModel):
+    email: str
+    tenant_id: Optional[str] = None
+
+
+class PasswordResetConfirmRequest(BaseModel):
+    token: str
+    new_password: str
+
+
+class PasswordResetAdminRequest(BaseModel):
+    reason: Optional[str] = None
+    expires_in_minutes: int = 30
+
+
+class UserSessionRecord(BaseModel):
+    session_token: str
+    user_id: str
+    tenant_id: str
+    role: EnterpriseRole
+    permissions: list[str] = Field(default_factory=list)
+    created_at: str
+    last_seen_at: Optional[str] = None
+    expires_at: str
+    revoked_at: Optional[str] = None
+    revoked_reason: Optional[str] = None
+    current: bool = False
+    ip: Optional[str] = None
+    user_agent: Optional[str] = None
+
+
+class UserSessionListResponse(BaseModel):
+    items: list[UserSessionRecord] = Field(default_factory=list)
+    total: int
+
+
+class SessionRevokeRequest(BaseModel):
+    session_token: Optional[str] = None
+    user_id: Optional[str] = None
+    revoke_all: bool = False
+    reason: Optional[str] = None
+
+
+class SessionRevokeResponse(BaseModel):
+    revoked: int
+    message: str
 
 
 class AdminEvent(BaseModel):
@@ -325,9 +380,11 @@ class EnterpriseUserRecord(BaseModel):
     user_id: str
     name: str
     email: str
-    role: Literal["admin", "operator", "viewer"]
+    role: EnterpriseRole
     tenant_id: str
     status: Literal["active", "invited", "disabled"] = "active"
+    permissions: list[str] = Field(default_factory=list)
+    must_change_password: bool = False
 
 
 class EnterpriseUserCreate(BaseModel):
@@ -335,7 +392,7 @@ class EnterpriseUserCreate(BaseModel):
     name: str
     email: str
     password: str
-    role: Literal["admin", "operator", "viewer"] = "viewer"
+    role: EnterpriseRole = "viewer"
     tenant_id: str = "default"
     status: Literal["active", "invited", "disabled"] = "invited"
 
@@ -344,11 +401,12 @@ class EnterpriseUserUpdate(BaseModel):
     name: Optional[str] = None
     email: Optional[str] = None
     password: Optional[str] = None
-    role: Optional[Literal["admin", "operator", "viewer"]] = None
+    role: Optional[EnterpriseRole] = None
     tenant_id: Optional[str] = None
     status: Optional[Literal["active", "invited", "disabled"]] = None
     approve_sensitive_change: Optional[bool] = None
     approval_ticket: Optional[str] = None
+    must_change_password: Optional[bool] = None
 
 
 class NormalizedDocument(BaseModel):

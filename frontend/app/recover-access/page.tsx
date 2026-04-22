@@ -10,11 +10,13 @@ import { Badge, Button, Card, Input, Select, Textarea, useToast } from "@/compon
 function RecoveryContent() {
   const router = useRouter();
   const { pushToast } = useToast();
-  const { session, requestRecovery } = useEnterpriseSession();
+  const { session, requestRecovery, confirmPasswordReset } = useEnterpriseSession();
   const tenants = session?.available_tenants ?? [];
   const [email, setEmail] = useState("");
   const [tenantId, setTenantId] = useState(session?.active_tenant.tenant_id ?? "default");
   const [reason, setReason] = useState("Sessão expirada ou acesso negado");
+  const [token, setToken] = useState("");
+  const [newPassword, setNewPassword] = useState("");
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -26,7 +28,9 @@ function RecoveryContent() {
     event.preventDefault();
     setLoading(true);
     try {
-      const message = await requestRecovery({ email: email.trim(), tenant_id: tenantId, reason });
+      const message = token.trim() && newPassword.trim()
+        ? await confirmPasswordReset({ token: token.trim(), new_password: newPassword.trim() })
+        : await requestRecovery({ email: email.trim(), tenant_id: tenantId, reason });
       pushToast({ title: "Recuperação enviada", description: message, intent: "success" });
       router.push("/login");
     } catch (error) {
@@ -92,11 +96,24 @@ function RecoveryContent() {
               Motivo
               <Textarea value={reason} onChange={(event) => setReason(event.target.value)} />
             </label>
+            <label className="ui-label">
+              Token de reset
+              <Input value={token} onChange={(event) => setToken(event.target.value)} placeholder="Opcional: token recebido por canal seguro" />
+            </label>
+            <label className="ui-label">
+              Nova senha
+              <Input
+                type="password"
+                value={newPassword}
+                onChange={(event) => setNewPassword(event.target.value)}
+                placeholder="Obrigatória apenas para concluir reset com token"
+              />
+            </label>
 
             <div className="auth-actions">
               <Button type="submit" disabled={loading}>
                 <Mail size={16} />
-                {loading ? "Enviando..." : "Solicitar recuperação"}
+                {loading ? "Enviando..." : token.trim() && newPassword.trim() ? "Concluir reset" : "Solicitar recuperação"}
               </Button>
               <Button type="button" variant="ghost" onClick={() => router.push("/login")}>
                 <ArrowLeft size={16} />

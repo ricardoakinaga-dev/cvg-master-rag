@@ -3,6 +3,7 @@ Search Service — orchestrates retrieval + answer generation
 """
 import time
 import json
+import re
 from datetime import datetime, timezone
 
 from models.schemas import QueryRequest, QueryResponse, SearchRequest, SearchResponse, Citation, GroundingReport
@@ -70,6 +71,48 @@ _SEIZURE_PROTOCOL_HINTS = [
     "midazolam",
     "anticonvulsant",
 ]
+_DOMAIN_ACRONYM_ALIASES = {
+    "drc": "doença renal crônica",
+    "irc": "insuficiência renal crônica",
+    "dut": "doença do trato urinário",
+    "itu": "infecção do trato urinário",
+    "ircf": "insuficiência renal crônica felina",
+}
+
+
+def _answer_is_abstention(answer: str) -> bool:
+    normalized = (answer or "").strip().lower()
+    if not normalized:
+        return True
+    return normalized.startswith("não sei") or normalized.startswith(
+        "não tenho informações suficientes"
+    )
+
+
+def _expand_domain_acronyms(query: str) -> str:
+    expanded = query
+    for acronym, replacement in _DOMAIN_ACRONYM_ALIASES.items():
+        expanded = re.sub(
+            rf"\b{re.escape(acronym)}\b",
+            replacement,
+            expanded,
+            flags=re.IGNORECASE,
+        )
+    return expanded
+
+
+def _query_is_acronym_heavy(query: str) -> bool:
+    tokens = re.findall(r"\b[\wÀ-ÿ]{2,}\b", query)
+    if not tokens:
+        return False
+    acronym_like = [
+        token for token in tokens
+        if len(token) <= 4 and token.upper() == token and token.isalpha()
+    ]
+    if acronym_like:
+        return True
+    lower_tokens = [token.lower() for token in tokens]
+    return any(token in _DOMAIN_ACRONYM_ALIASES for token in lower_tokens)
 
 
 def _should_expand_adaptive(query: str) -> tuple[bool, str]:
@@ -150,6 +193,8 @@ def _finalize_low_confidence(
     retrieval_low_confidence: bool,
     has_results: bool,
     grounding_result: GroundingReport | None,
+    *,
+    allow_grounding_override: bool = True,
 ) -> tuple[bool, str]:
     """
     Convert retrieval heuristics into the final user-facing low_confidence signal.
@@ -161,10 +206,42 @@ def _finalize_low_confidence(
         return True, "no_results"
     if not retrieval_low_confidence:
         return False, "retrieval_ok"
+    if not allow_grounding_override:
+        return True, "weak_query_support"
     if grounding_result and grounding_result.grounded and not grounding_result.needs_review:
         if grounding_result.citation_coverage >= LOW_CONFIDENCE_GROUNDING_OVERRIDE_THRESHOLD:
             return False, "grounding_override"
     return True, "retrieval_low_confidence"
+
+
+def _query_has_minimal_support(query: str, chunks: list[dict]) -> bool:
+    """
+    Require at least one non-numeric lexical bridge between the question and the
+    retrieved context before we allow a low-confidence retrieval to be upgraded.
+    """
+    from services.vector_service import _content_query_terms, _tokenize_terms
+
+    query_terms = _content_query_terms(query)
+    if not query_terms:
+        query_terms = {
+            token
+            for token in _tokenize_terms(query, min_len=2)
+            if not token.isdigit()
+        }
+    else:
+        query_terms = {
+            token
+            for token in query_terms
+            if not token.isdigit()
+        }
+    if not query_terms:
+        return True
+
+    for chunk in chunks:
+        chunk_terms = set(_tokenize_terms(str(chunk.get("text", "")), min_len=2))
+        if query_terms.intersection(chunk_terms):
+            return True
+    return False
 
 
 def _resolve_search_profile(
@@ -198,6 +275,8 @@ def _should_try_neural_query_retry(request: QueryRequest, search_resp: SearchRes
     if search_resp.reranking_applied:
         return False
     if not search_resp.results:
+        return False
+    if _query_is_acronym_heavy(request.query):
         return False
     return bool(search_resp.low_confidence)
 
@@ -339,7 +418,7 @@ def execute_search(
     expansion_applied = False
     expansion_fallback = False
     expansion_method: str | None = None
-    search_query = request.query
+    search_query = _expand_domain_acronyms(request.query)
 
     if expansion_mode == "always":
         expansion_requested = True
@@ -470,6 +549,9 @@ def search_and_answer(
         })
 
     retrieval_low_confidence = bool(search_resp.low_confidence)
+    retrieval_has_minimal_support = _query_has_minimal_support(request.query, chunks_data)
+    if not retrieval_has_minimal_support:
+        retrieval_low_confidence = True
 
     # ── Step 3: Generate answer ───────────────────────────────
     if not search_resp.results:
@@ -488,6 +570,22 @@ def search_and_answer(
         citation_coverage = 0.0
         final_low_confidence = True
         low_confidence_reason = "no_results"
+    elif retrieval_low_confidence and not retrieval_has_minimal_support:
+        answer = "Não tenho informações suficientes para responder a esta pergunta de forma precisa."
+        confidence = "low"
+        grounded = False
+        chunks_used = []
+        citations = []
+        grounding_result = GroundingReport(
+            grounded=False,
+            citation_coverage=0.0,
+            uncited_claims=[],
+            needs_review=True,
+            reason="Retrieved context does not support the query terms",
+        )
+        citation_coverage = 0.0
+        final_low_confidence = True
+        low_confidence_reason = "weak_query_support"
     else:
         answer_text, chunk_ids, llm_latency = generate_answer(
             query=request.query,
@@ -537,8 +635,14 @@ def search_and_answer(
             retrieval_low_confidence=retrieval_low_confidence,
             has_results=bool(search_resp.results),
             grounding_result=grounding_result,
+            allow_grounding_override=retrieval_has_minimal_support,
         )
-        confidence = "medium" if final_low_confidence else ("medium" if retrieval_low_confidence else "high")
+        if _answer_is_abstention(answer):
+            final_low_confidence = True
+            low_confidence_reason = "abstained"
+            confidence = "low"
+        else:
+            confidence = "medium" if final_low_confidence else ("medium" if retrieval_low_confidence else "high")
 
         # Truncate citation text for response (keep first 300 chars)
         citations = [

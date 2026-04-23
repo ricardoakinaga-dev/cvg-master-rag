@@ -9,6 +9,8 @@ from typing import Iterator
 
 from models.schemas import Chunk, NormalizedDocument
 
+MARKDOWN_SEPARATOR_PATTERN = re.compile(r"^\s*(?:---+|\*\*\*+|___+)\s*$")
+
 
 def recursive_chunk(
     normalized_doc: NormalizedDocument,
@@ -54,6 +56,25 @@ def recursive_chunk(
     for para_start, para_text in paragraphs:
         para_text = para_text.strip()
         if not para_text:
+            continue
+
+        if MARKDOWN_SEPARATOR_PATTERN.match(para_text):
+            if current_chunk_text.strip():
+                chunk = _make_chunk(
+                    text=current_chunk_text,
+                    doc_id=normalized_doc.document_id,
+                    workspace_id=workspace_id,
+                    chunk_index=chunk_index,
+                    start_char=current_chunk_start,
+                    end_char=current_chunk_start + len(current_chunk_text),
+                    page_hint=_get_page_hint(current_chunk_start, page_boundaries),
+                    strategy="recursive",
+                    chunk_size=chunk_size
+                )
+                chunks.append(chunk)
+                chunk_index += 1
+            current_chunk_text = ""
+            current_chunk_start = para_start + len(para_text)
             continue
 
         para_len = len(para_text)

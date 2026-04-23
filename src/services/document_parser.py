@@ -166,7 +166,8 @@ def _parse_md(file_path: Path, workspace_id: str):
     if not content.strip():
         raise ParseError("Arquivo MD vazio.")
 
-    # Split into sections by headings
+    # Split into sections by headings, preserving heading text so later
+    # chunking can keep topic boundaries visible to retrieval.
     sections = []
     lines = content.split("\n")
     current_section = {"title": "Inicio", "level": 0, "text": ""}
@@ -180,7 +181,7 @@ def _parse_md(file_path: Path, workspace_id: str):
             current_section = {
                 "title": m.group(2).strip(),
                 "level": len(m.group(1)),
-                "text": ""
+                "text": line.strip() + "\n"
             }
         else:
             current_section["text"] += line + "\n"
@@ -188,8 +189,8 @@ def _parse_md(file_path: Path, workspace_id: str):
     if current_section["text"]:
         sections.append(current_section)
 
-    # Merge all text for pages
-    full_text = "\n".join(s.get("text", "") for s in sections)
+    # Merge sections preserving explicit boundaries between topics.
+    full_text = "\n\n---\n\n".join(s.get("text", "").strip() for s in sections if s.get("text", "").strip())
 
     pages = [{"page_number": 1, "text": full_text.strip()}]
     total_chars = len(full_text)

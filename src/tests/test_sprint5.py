@@ -7,6 +7,7 @@ Two categories of tests:
 - Unit/integration tests: use mocks for embeddings, run offline without API key
 - Live tests: require OPENAI_API_KEY, marked with @pytest.mark.integration
 """
+import os
 import sys
 from pathlib import Path
 import importlib.util
@@ -427,6 +428,29 @@ class TestEmbeddingBatching:
             assert not missing, f"Q{q['id']}: missing {missing}"
 
 
+class TestStartApiBootstrap:
+    def test_load_local_env_populates_missing_variables_without_override(self, tmp_path, monkeypatch):
+        from start_api import _load_local_env
+
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "OPENAI_API_KEY=test-key\n"
+            "SESSION_COOKIE_SECURE=false\n"
+            "EXISTING_VAR=from-file\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("SESSION_COOKIE_SECURE", raising=False)
+        monkeypatch.setenv("EXISTING_VAR", "from-env")
+
+        _load_local_env(env_file)
+
+        assert os.getenv("OPENAI_API_KEY") == "test-key"
+        assert os.getenv("SESSION_COOKIE_SECURE") == "false"
+        assert os.getenv("EXISTING_VAR") == "from-env"
+
+
 # ── Qdrant Corpus Consistency ──────────────────────────────────────────────
 
 class TestQdrantCorpusConsistency:
@@ -587,6 +611,11 @@ class TestLowConfidence:
         resp = self._search('how to bake a chocolate cake recipe')
         assert resp.low_confidence, f"OOD query returned low_confidence=False"
 
+    def test_numeric_only_overlap_query_low_confidence(self, setup_mock):
+        """A query matching only an incidental year must still be treated as low confidence."""
+        resp = self._search('Quem venceu a Copa do Mundo de 2014?')
+        assert resp.low_confidence, "Numeric-only overlap returned low_confidence=False"
+
     def test_symbol_query_low_confidence(self, setup_mock):
         """A query of random symbols must set low_confidence=True."""
         from services.vector_service import _bm25_search
@@ -594,6 +623,61 @@ class TestLowConfidence:
         assert len(sparse) == 0
         resp = self._search('!!!!!@@@###$$%%^^^&&*')
         assert resp.low_confidence, f"Symbol query returned low_confidence=False"
+
+
+class TestMarkdownParsingAndChunking:
+    def test_parse_md_preserves_headings_in_page_text(self, tmp_path):
+        from services.document_parser import parse_document
+
+        md_file = tmp_path / "manual.md"
+        md_file.write_text(
+            "# Politica de Reembolso\n"
+            "Prazo de 30 dias.\n\n"
+            "## Retencao de Dados\n"
+            "Dados ficam por 7 anos.\n",
+            encoding="utf-8",
+        )
+
+        normalized, metadata = parse_document(md_file, workspace_id="default")
+
+        page_text = normalized.pages[0]["text"]
+        assert "Politica de Reembolso" in page_text
+        assert "Retencao de Dados" in page_text
+        assert normalized.metadata["section_count"] == 2
+        assert metadata.source_type == "md"
+
+    def test_recursive_chunk_flushes_on_markdown_separator(self):
+        from services.chunker import recursive_chunk
+        from models.schemas import NormalizedDocument
+
+        normalized = NormalizedDocument(
+            document_id="doc-md-separator",
+            source_type="md",
+            filename="manual.md",
+            workspace_id="default",
+            created_at="2026-01-01T00:00:00Z",
+            pages=[
+                {
+                    "page_number": 1,
+                    "text": (
+                        "Politica de reembolso com prazo de 30 dias.\n\n"
+                        "Procedimento inicial e evidencias.\n\n"
+                        "---\n\n"
+                        "Politica de retencao de dados por 7 anos.\n\n"
+                        "Base legal e requisitos regulatorios.\n"
+                    ),
+                }
+            ],
+            sections=[],
+            metadata={},
+            raw_json_path="",
+        )
+
+        chunks = recursive_chunk(normalized, chunk_size=500, overlap=0, workspace_id="default")
+
+        assert len(chunks) == 2
+        assert "reembolso" in chunks[0].text.lower()
+        assert "retencao de dados" in chunks[1].text.lower()
 
 
 # ── Multi-Document Search ─────────────────────────────────────────────────
@@ -952,6 +1036,114 @@ class TestMultiDocumentSearch:
         assert not resp.low_confidence
         assert [item.document_id for item in resp.results] == ["doc-policy"]
         assert resp.results[0].document_filename == "policy.md"
+
+    def test_search_without_catalog_scope_filter_keeps_operational_hits(self, monkeypatch):
+        """Search must not silently drop operational chunks when no catalog_scope filter was requested."""
+        from types import SimpleNamespace
+        from services.vector_service import search_hybrid
+
+        class _FakeClient:
+            def query_points(self, **kwargs):
+                return SimpleNamespace(points=[])
+
+        monkeypatch.setattr("services.vector_service.get_client", lambda: _FakeClient())
+        monkeypatch.setattr("services.vector_service.ensure_collection", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            "services.vector_service.get_document_registry",
+            lambda workspace_id="default": {},
+        )
+        monkeypatch.setattr(
+            "services.vector_service.list_document_items",
+            lambda workspace_id="default", limit=10000, offset=0, source_type=None, status=None, query=None: {
+                "items": [
+                    {
+                        "document_id": "doc-operational",
+                        "filename": "operational.pdf",
+                        "source_type": "pdf",
+                        "tags": ["vet"],
+                        "catalog_scope": "operational",
+                    }
+                ]
+            },
+        )
+        monkeypatch.setattr(
+            "services.vector_service._bm25_search",
+            lambda query, workspace_id, limit=20, filters=None: [
+                {
+                    "chunk_id": "chunk-operational",
+                    "document_id": "doc-operational",
+                    "text": "Sinais sugestivos de doença renal crônica em gatos incluem perda de peso e alterações urinárias.",
+                    "score": 0.88,
+                    "page_hint": 1,
+                    "dense_score": 0.0,
+                    "sparse_score": 0.88,
+                },
+            ],
+        )
+
+        resp = search_hybrid(SearchRequest(
+            query="sinais de doença renal crônica em gatos",
+            workspace_id="default",
+            top_k=5,
+            threshold=0.0,
+        ))
+
+        assert [item.document_id for item in resp.results] == ["doc-operational"]
+        assert resp.results[0].document_filename == "operational.pdf"
+
+    def test_search_with_explicit_canonical_scope_still_filters_operational_hits(self, monkeypatch):
+        """Explicit catalog_scope=canonical must continue filtering out operational chunks."""
+        from types import SimpleNamespace
+        from services.vector_service import search_hybrid
+
+        class _FakeClient:
+            def query_points(self, **kwargs):
+                return SimpleNamespace(points=[])
+
+        monkeypatch.setattr("services.vector_service.get_client", lambda: _FakeClient())
+        monkeypatch.setattr("services.vector_service.ensure_collection", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            "services.vector_service.get_document_registry",
+            lambda workspace_id="default": {},
+        )
+        monkeypatch.setattr(
+            "services.vector_service.list_document_items",
+            lambda workspace_id="default", limit=10000, offset=0, source_type=None, status=None, query=None: {
+                "items": [
+                    {
+                        "document_id": "doc-operational",
+                        "filename": "operational.pdf",
+                        "source_type": "pdf",
+                        "tags": ["vet"],
+                        "catalog_scope": "operational",
+                    }
+                ]
+            },
+        )
+        monkeypatch.setattr(
+            "services.vector_service._bm25_search",
+            lambda query, workspace_id, limit=20, filters=None: [
+                {
+                    "chunk_id": "chunk-operational",
+                    "document_id": "doc-operational",
+                    "text": "Sinais sugestivos de doença renal crônica em gatos incluem perda de peso e alterações urinárias.",
+                    "score": 0.88,
+                    "page_hint": 1,
+                    "dense_score": 0.0,
+                    "sparse_score": 0.88,
+                },
+            ],
+        )
+
+        resp = search_hybrid(SearchRequest(
+            query="sinais de doença renal crônica em gatos",
+            workspace_id="default",
+            top_k=5,
+            threshold=0.0,
+            filters={"catalog_scope": "canonical"},
+        ))
+
+        assert resp.results == []
 
     def test_page_hint_range_filter_is_honored_after_fusion(self, monkeypatch):
         """page_hint_min/page_hint_max must filter fused retrieval results."""
@@ -2483,6 +2675,42 @@ class TestQueryPipeline:
         assert "KYC reforçado" not in answer
         assert chunk_ids == ["chunk-liq-1"]
 
+    def test_generate_answer_offline_prioritizes_symptom_sentence_over_numeric_anatomy(self, monkeypatch):
+        """Offline fallback must not prefer measurement-heavy anatomy text for symptom questions."""
+        from services import llm_service
+
+        monkeypatch.setattr(llm_service.client, "api_key", "")
+
+        answer, chunk_ids, _ = llm_service.generate_answer(
+            query="quais os sinais de doença renal em gatos?",
+            chunks=[
+                {
+                    "chunk_id": "chunk-anatomia",
+                    "text": (
+                        "O parênquima renal varia de 1,6 a 1,9 para os gatos. "
+                        "No parênquima renal estão os néfrons que são as unidades estruturais dos rins."
+                    ),
+                    "page_hint": 469,
+                    "score": 1.0,
+                    "document_id": "doc-vet",
+                },
+                {
+                    "chunk_id": "chunk-sinais",
+                    "text": (
+                        "Quando o paciente apresentar sinais sugestivos de doença do trato urinário "
+                        "(superior ou inferior), a urinálise é extremamente importante em cães e gatos."
+                    ),
+                    "page_hint": 488,
+                    "score": 1.0,
+                    "document_id": "doc-vet",
+                },
+            ],
+        )
+
+        assert "sinais sugestivos de doença do trato urinário" in answer
+        assert "1,6 a 1,9" not in answer
+        assert chunk_ids == ["chunk-sinais"]
+
     def test_query_pipeline_returns_answer_offline_without_api_key(self, monkeypatch):
         """search_and_answer must return a grounded response offline when retrieval succeeds."""
         from services.search_service import search_and_answer
@@ -2574,6 +2802,62 @@ class TestQueryPipeline:
         assert resp.grounded is True
         assert resp.citation_coverage == 1.0
 
+    def test_query_pipeline_marks_abstention_as_low_confidence(self, monkeypatch):
+        """A final abstention must not be reported as high-confidence."""
+        from services.search_service import search_and_answer
+
+        monkeypatch.setattr(
+            "services.search_service.search_hybrid",
+            lambda request: SearchResponse(
+                query=request.query,
+                workspace_id=request.workspace_id,
+                results=[
+                    SearchResultItem(
+                        chunk_id="chunk-vet-1",
+                        document_id="doc-vet-1",
+                        document_filename="manual.pdf",
+                        text="Quando o paciente apresentar sinais sugestivos de doença do trato urinário, a urinálise é extremamente importante em cães e gatos.",
+                        score=0.92,
+                        page_hint=488,
+                        source="hybrid",
+                        workspace_id=request.workspace_id,
+                        source_type="pdf",
+                        tags=["urinario"],
+                    )
+                ],
+                total_candidates=4,
+                low_confidence=False,
+                retrieval_time_ms=12,
+                method="híbrida",
+                scores_breakdown={"dense": 0.61, "sparse": 0.88, "rrf": 0.92},
+            ),
+        )
+        monkeypatch.setattr(
+            "services.search_service.generate_answer",
+            lambda **kwargs: ("Não sei.", ["chunk-vet-1"], 5.0),
+        )
+        monkeypatch.setattr(
+            "services.search_service.verify_grounding",
+            lambda answer, citations: {
+                "grounded": False,
+                "citation_coverage": 0.0,
+                "uncited_claims": [],
+                "needs_review": True,
+                "reason": "abstained",
+            },
+        )
+
+        resp = search_and_answer(QueryRequest(
+            query="quais os sinais de doença renal crônica em gatos?",
+            workspace_id="default",
+            top_k=3,
+            threshold=0.7,
+        ))
+
+        assert resp.answer == "Não sei."
+        assert resp.low_confidence is True
+        assert resp.confidence == "low"
+
     def test_query_grounding_can_clear_heuristic_low_confidence(self, monkeypatch):
         """A grounded answer with strong citations must not keep a false-positive low_confidence flag."""
         from services.search_service import search_and_answer
@@ -2632,6 +2916,64 @@ class TestQueryPipeline:
         assert resp.retrieval["low_confidence_reason"] == "grounding_override"
         assert resp.grounding is not None
         assert resp.grounding.grounded is True
+
+    def test_query_pipeline_abstains_when_low_confidence_retrieval_is_out_of_scope(self, monkeypatch):
+        """Query pipeline must not answer from irrelevant chunks when retrieval is low-confidence."""
+        from services.search_service import search_and_answer
+
+        monkeypatch.setattr(
+            "services.search_service.search_hybrid",
+            lambda request: SearchResponse(
+                query=request.query,
+                workspace_id=request.workspace_id,
+                results=[
+                    SearchResultItem(
+                        chunk_id="chunk-incidental-year",
+                        document_id="doc-incidental-year",
+                        document_filename="politicas.md",
+                        text="Dados são mantidos por 7 anos conforme a Lei 12.965/2014 e normas do Banco Central.",
+                        score=0.18,
+                        page_hint=1,
+                        source="hybrid",
+                        workspace_id=request.workspace_id,
+                        source_type="md",
+                        tags=["compliance"],
+                    )
+                ],
+                total_candidates=1,
+                low_confidence=True,
+                retrieval_time_ms=11,
+                method="híbrida",
+            ),
+        )
+        monkeypatch.setattr(
+            "services.search_service.generate_answer",
+            lambda query, chunks, system_prompt=None: ("Dados são mantidos por 7 anos.", [chunks[0]["chunk_id"]], 5),
+        )
+        monkeypatch.setattr(
+            "services.search_service.verify_grounding",
+            lambda answer, citations: {
+                "grounded": True,
+                "citation_coverage": 1.0,
+                "uncited_claims": [],
+                "needs_review": False,
+                "reason": None,
+            },
+        )
+
+        resp = search_and_answer(QueryRequest(
+            query="Quem venceu a Copa do Mundo de 2014?",
+            workspace_id="default",
+            top_k=3,
+            threshold=0.7,
+        ))
+
+        assert resp.low_confidence is True
+        assert resp.confidence == "low"
+        assert resp.answer == "Não tenho informações suficientes para responder a esta pergunta de forma precisa."
+        assert resp.chunks_used == []
+        assert resp.grounded is False
+        assert resp.retrieval["low_confidence_reason"] == "weak_query_support"
 
     def test_query_pipeline_retries_with_neural_reranking_when_initial_retrieval_is_bad(self, monkeypatch):
         """Query pipeline should retry with neural reranking when the first retrieval is low-confidence."""
@@ -4460,6 +4802,137 @@ class TestNeuralReranking:
         r = NeuralReranker()
         result = r.rerank("query", [])
         assert result == []
+
+
+class TestConfidenceScoreNormalization:
+    def test_confidence_score_avoids_sparse_saturation(self):
+        """High BM25 scores should not collapse every candidate to 1.0."""
+        from services.vector_service import _compute_confidence_score
+
+        strongest = _compute_confidence_score(
+            {
+                "score": 0.031514,
+                "dense_score": 0.367472,
+                "sparse_score": 3.465736,
+                "text": "Sinais sugestivos de doença renal e urinálise importante em gatos.",
+            },
+            query="qual os sinais de doença renal crônica e gatos",
+        )
+        weaker = _compute_confidence_score(
+            {
+                "score": 0.015873,
+                "dense_score": 0.0,
+                "sparse_score": 3.044522,
+                "text": "Estrutura do parênquima renal e medidas anatômicas em gatos.",
+            },
+            query="qual os sinais de doença renal crônica e gatos",
+        )
+
+        assert strongest < 1.0
+        assert weaker < 1.0
+        assert strongest > weaker
+        assert strongest >= 0.7
+
+    def test_confidence_score_preserves_dense_threshold_behavior(self):
+        """Dense-only confidence should remain interpretable against configured thresholds."""
+        from services.vector_service import _compute_confidence_score
+
+        confidence = _compute_confidence_score(
+            {
+                "score": 0.016393,
+                "dense_score": 0.82,
+                "sparse_score": 0.0,
+                "text": "texto denso",
+            },
+            query="reembolso prazo",
+        )
+
+        assert confidence >= 0.80
+
+
+class TestClinicalAcronymHandling:
+    def test_expand_domain_acronyms_rewrites_known_clinical_shortcuts(self):
+        from services.search_service import _expand_domain_acronyms
+
+        expanded = _expand_domain_acronyms("qual os sintomas de DRC em gatos")
+
+        assert "doença renal crônica" in expanded.lower()
+        assert "drc" not in expanded.lower()
+
+    def test_execute_search_expands_acronyms_before_retrieval(self, monkeypatch):
+        from services.search_service import execute_search
+
+        captured = {}
+
+        def fake_search_hybrid(request):
+            captured["query"] = request.query
+            return SearchResponse(
+                query=request.query,
+                workspace_id=request.workspace_id,
+                results=[],
+                total_candidates=0,
+                low_confidence=True,
+                retrieval_time_ms=5,
+                method="híbrida",
+            )
+
+        monkeypatch.setattr("services.search_service.search_hybrid", fake_search_hybrid)
+
+        execute_search(SearchRequest(
+            query="qual os sintomas de DRC em gatos",
+            workspace_id="default",
+            top_k=5,
+            threshold=0.7,
+        ))
+
+        assert "doença renal crônica" in captured["query"].lower()
+
+    def test_neural_retry_is_disabled_for_acronym_heavy_query(self):
+        from services.search_service import _should_try_neural_query_retry
+
+        request = QueryRequest(
+            query="qual os sintomas de DRC em gatos",
+            workspace_id="default",
+            top_k=5,
+            threshold=0.7,
+        )
+        response = SearchResponse(
+            query=request.query,
+            workspace_id=request.workspace_id,
+            results=[
+                SearchResultItem(
+                    chunk_id="chunk-1",
+                    document_id="doc-1",
+                    text="texto",
+                    score=0.4,
+                    page_hint=1,
+                    source="hybrid",
+                    workspace_id=request.workspace_id,
+                    source_type="pdf",
+                    tags=[],
+                )
+            ],
+            total_candidates=10,
+            low_confidence=True,
+            retrieval_time_ms=10,
+            method="híbrida",
+            reranking_applied=False,
+            reranking_method=None,
+        )
+
+        assert _should_try_neural_query_retry(request, response) is False
+
+    def test_minimal_query_support_requires_content_terms_not_generic_overlap(self):
+        from services.vector_service import _has_minimal_query_support
+
+        assert _has_minimal_query_support(
+            "qual os sintomas de doença renal crônica em gatos",
+            "Quando o paciente apresentar sinais sugestivos de doença renal e insuficiência renal em gatos.",
+        )
+        assert not _has_minimal_query_support(
+            "qual os sintomas de doença renal crônica em gatos",
+            "O histórico e os sintomas de pacientes gastro- pátas em gatos são vagos e inespecíficos.",
+        )
 
 
 class TestQdrantIndexBatching:

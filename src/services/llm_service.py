@@ -55,13 +55,37 @@ def _split_chunk_units(text: str) -> list[str]:
     return units
 
 
-def _score_unit(unit: str, query_terms: list[str]) -> tuple[int, int, int, int]:
+def _query_prefers_numeric_evidence(query: str, query_terms: list[str]) -> bool:
+    if re.search(r"\d", query):
+        return True
+    numeric_intent_terms = {
+        "prazo", "prazos", "tempo", "dias", "meses", "anos", "idade",
+        "idades", "dose", "doses", "dosagem", "dosagens", "quantos",
+        "quantas", "quanto", "valores", "valor", "percentual", "percentuais",
+    }
+    return any(term in numeric_intent_terms for term in query_terms)
+
+
+def _score_unit(
+    unit: str,
+    query_terms: list[str],
+    *,
+    prefer_numeric_evidence: bool,
+) -> tuple[int, int, int, int, int]:
     lower = unit.lower()
-    term_hits = sum(1 for term in query_terms if term in lower)
+    distinct_term_hits = sum(1 for term in query_terms if term in lower)
+    repeated_term_hits = sum(lower.count(term) for term in query_terms)
     has_number = 1 if re.search(r"\d", unit) else 0
+    numeric_alignment = has_number if prefer_numeric_evidence else -has_number
     starts_like_definition = 1 if re.match(r"^[A-ZÀ-Ý0-9].{0,120}$", unit.strip()) else 0
     length_score = min(len(unit), 220)
-    return (term_hits, has_number, starts_like_definition, length_score)
+    return (
+        distinct_term_hits,
+        repeated_term_hits,
+        numeric_alignment,
+        starts_like_definition,
+        length_score,
+    )
 
 
 def _offline_answer_from_chunks(query: str, chunks: list[dict]) -> tuple[str, list[str]]:
@@ -75,7 +99,8 @@ def _offline_answer_from_chunks(query: str, chunks: list[dict]) -> tuple[str, li
         return "Não sei — nenhum contexto relevante encontrado.", []
 
     query_terms = _normalize_query_terms(query)
-    candidates: list[tuple[tuple[int, int, int, int], float, int, str, str]] = []
+    prefer_numeric_evidence = _query_prefers_numeric_evidence(query, query_terms)
+    candidates: list[tuple[tuple[int, int, int, int, int], float, int, str, str]] = []
 
     for chunk_index, chunk in enumerate(chunks[:5]):
         chunk_id = chunk.get("chunk_id", f"chunk_{chunk_index}")
@@ -83,7 +108,17 @@ def _offline_answer_from_chunks(query: str, chunks: list[dict]) -> tuple[str, li
         for unit in _split_chunk_units(chunk.get("text", "")):
             if len(unit) < 24:
                 continue
-            candidates.append((_score_unit(unit, query_terms), chunk_score, chunk_index, chunk_id, unit))
+            candidates.append((
+                _score_unit(
+                    unit,
+                    query_terms,
+                    prefer_numeric_evidence=prefer_numeric_evidence,
+                ),
+                chunk_score,
+                chunk_index,
+                chunk_id,
+                unit,
+            ))
 
     if not candidates:
         top = chunks[0]

@@ -2,6 +2,7 @@
 Qdrant Vector Service — handles dense + sparse (BM25) indexing and hybrid search.
 """
 import hashlib
+import math
 import os
 import json
 import time
@@ -62,6 +63,13 @@ MEANINGLESS_QUERY_TOKENS = {
     "sao", "são", "sua", "suas", "seu", "seus", "uma", "um", "usa", "usada", "usado",
     "utiliza", "utilizado",
 }
+LOW_SIGNAL_DOMAIN_TOKENS = {
+    "animal", "animais", "paciente", "pacientes",
+    "gato", "gatos", "felino", "felinos",
+    "cao", "caes", "cão", "cães", "canino", "caninos",
+    "sintoma", "sintomas", "sinal", "sinais",
+    "doenca", "doenças", "doença", "doencas",
+}
 
 
 _client: Optional[QdrantClient] = None
@@ -85,6 +93,14 @@ def _tokenize_terms(text: str, min_len: int = 2) -> list[str]:
     return tokens
 
 
+def _content_query_terms(text: str) -> set[str]:
+    """Higher-signal query terms used to reject generic overlap."""
+    return {
+        token for token in _tokenize_terms(text, min_len=2)
+        if token not in LOW_SIGNAL_DOMAIN_TOKENS
+    }
+
+
 def _lexical_diversity_ratio(text: str) -> float:
     """
     Estimate how repetitive a chunk is.
@@ -97,6 +113,55 @@ def _lexical_diversity_ratio(text: str) -> float:
     if len(tokens) < 20:
         return 1.0
     return len(set(tokens)) / len(tokens)
+
+
+def _query_overlap_stats(query: str, text: str) -> dict[str, float | int]:
+    """
+    Measure lexical support between the user query and a retrieved chunk.
+
+    We separate numeric from non-numeric terms because incidental year/id matches
+    are common in enterprise corpora and should not make an off-scope result look
+    trustworthy on their own.
+    """
+    query_terms = set(_tokenize_terms(query, min_len=2))
+    text_terms = set(_tokenize_terms(text, min_len=2))
+    query_content_terms = _content_query_terms(query)
+    matched_content_terms = query_content_terms.intersection(text_terms)
+
+    matched_terms = query_terms.intersection(text_terms)
+    query_non_numeric_terms = {term for term in query_terms if not term.isdigit()}
+    matched_non_numeric_terms = {term for term in matched_terms if not term.isdigit()}
+
+    non_numeric_total = len(query_non_numeric_terms)
+    non_numeric_matched = len(matched_non_numeric_terms)
+
+    return {
+        "query_terms": len(query_terms),
+        "matched_terms": len(matched_terms),
+        "query_non_numeric_terms": non_numeric_total,
+        "matched_non_numeric_terms": non_numeric_matched,
+        "non_numeric_overlap_ratio": (
+            non_numeric_matched / non_numeric_total if non_numeric_total else 0.0
+        ),
+        "query_content_terms": len(query_content_terms),
+        "matched_content_terms": len(matched_content_terms),
+        "content_overlap_ratio": (
+            len(matched_content_terms) / len(query_content_terms) if query_content_terms else 0.0
+        ),
+    }
+
+
+def _has_minimal_query_support(query: str, text: str) -> bool:
+    """
+    Return True when a candidate has at least some non-numeric lexical support
+    for the query. Purely numeric overlap (years, IDs) does not count.
+    """
+    stats = _query_overlap_stats(query, text)
+    if int(stats["query_content_terms"]) > 0:
+        return int(stats["matched_content_terms"]) > 0
+    if int(stats["query_non_numeric_terms"]) == 0:
+        return True
+    return int(stats["matched_non_numeric_terms"]) > 0
 
 
 def _candidate_fingerprint(item: dict) -> tuple[str, str]:
@@ -317,7 +382,7 @@ def search_hybrid(
     }
     query_filter = _build_qdrant_filter(request.workspace_id, request.filters)
     candidate_limit = max(request.top_k * 10, 20)
-    canonical_only = not request.filters or request.filters.get("catalog_scope") == "canonical"
+    canonical_only = bool(request.filters and request.filters.get("catalog_scope") == "canonical")
 
     # 1. Dense search (embedding query)
     dense_results = []
@@ -365,7 +430,7 @@ def search_hybrid(
     fused = _rrf_fusion(dense_results, sparse_results, k=RRF_K)
     fused = _apply_post_filters(fused, request.filters, metadata_map)
     for item in fused:
-        item["confidence_score"] = _compute_confidence_score(item)
+        item["confidence_score"] = _compute_confidence_score(item, request.query)
         doc_meta = metadata_map.get(item.get("document_id"), {})
         # Enrich with canonical document metadata for reranker (filename, tags).
         # Operational uploads should not overwrite canonical ranking context when
@@ -787,17 +852,34 @@ class BM25FReranker:
         return _tokenize_terms(text, min_len=2)
 
 
-def _compute_confidence_score(item: dict) -> float:
+def _normalize_sparse_score(score: float) -> float:
+    """Map open-ended BM25-like scores into a stable 0-1 range without saturation."""
+    if score <= 0:
+        return 0.0
+    return max(0.0, min(1.0, math.tanh(score / 4.0)))
+
+
+def _normalize_rrf_score(score: float) -> float:
+    """Expose rank-only RRF evidence on a comparable 0-1 scale."""
+    if score <= 0:
+        return 0.0
+    return max(0.0, min(1.0, math.tanh(score * 30.0)))
+
+
+def _compute_confidence_score(item: dict, query: str | None = None) -> float:
     """
     Convert dense/sparse evidence into a human-readable confidence score.
 
     We keep RRF as the ranking mechanism, but expose a score that can be
     compared against the documented retrieval threshold.
     """
-    dense = float(item.get("dense_score", 0.0) or 0.0)
-    sparse = float(item.get("sparse_score", 0.0) or 0.0)
-    rrf = float(item.get("score", 0.0) or 0.0)
+    dense = max(0.0, min(1.0, float(item.get("dense_score", 0.0) or 0.0)))
+    sparse = _normalize_sparse_score(float(item.get("sparse_score", 0.0) or 0.0))
+    rrf = _normalize_rrf_score(float(item.get("score", 0.0) or 0.0))
     diversity = _lexical_diversity_ratio(item.get("text", ""))
+    has_minimal_support = True
+    if query:
+        has_minimal_support = _has_minimal_query_support(query, item.get("text", ""))
 
     if dense <= 0 and sparse <= 0:
         return max(0.0, min(1.0, rrf))
@@ -805,7 +887,9 @@ def _compute_confidence_score(item: dict) -> float:
     if dense > 0 and sparse > 0:
         stronger = max(dense, sparse)
         weaker = min(dense, sparse)
-        combined = stronger + (weaker * 0.2)
+        combined = stronger + (weaker * 0.15) + (rrf * 0.10)
+        if sparse > 0 and not has_minimal_support and dense < 0.55:
+            combined = min(combined, 0.19)
         return max(0.0, min(1.0, combined))
 
     score = max(dense, sparse)
@@ -813,6 +897,11 @@ def _compute_confidence_score(item: dict) -> float:
         # Dense-only hits with extremely repetitive text are usually spurious.
         if diversity < 0.2:
             score *= max(0.1, diversity / 0.2)
+        score += rrf * 0.10
+    elif sparse > 0 and not has_minimal_support and dense < 0.55:
+        score = min(score, 0.19)
+    else:
+        score += rrf * 0.10
 
     return max(0.0, min(1.0, score))
 
@@ -995,9 +1084,6 @@ def _apply_post_filters(candidates: list[dict], filters: Optional[dict], metadat
         return []
 
     normalized_filters = dict(filters or {})
-    if "catalog_scope" not in normalized_filters:
-        normalized_filters["catalog_scope"] = "canonical"
-
     return [item for item in candidates if _matches_filters(item, normalized_filters, metadata_map)]
 
 

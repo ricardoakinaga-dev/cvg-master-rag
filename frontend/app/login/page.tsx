@@ -13,8 +13,8 @@ function LoginContent() {
   const { session, signIn } = useEnterpriseSession();
   const tenants = session?.available_tenants ?? [];
   const [role, setRole] = useState<"super_admin" | "admin_rag" | "auditor" | "operator" | "viewer">("super_admin");
-  const [email, setEmail] = useState("admin@demo.local");
-  const [password, setPassword] = useState("demo1234");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [tenantId, setTenantId] = useState(session?.active_tenant.tenant_id ?? "default");
   const [loading, setLoading] = useState(false);
   const [nextPath, setNextPath] = useState("/");
@@ -93,7 +93,7 @@ function LoginContent() {
                 <Input
                   value={email}
                   onChange={(event) => setEmail(event.target.value)}
-                  placeholder="admin@demo.local"
+                  placeholder="Digite seu e-mail"
                   autoComplete="username"
                   autoCapitalize="none"
                   spellCheck={false}
